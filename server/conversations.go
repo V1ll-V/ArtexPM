@@ -501,25 +501,31 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		delete(s.chatCancel, busyKey)
 		s.chatMu.Unlock()
 	}()
-	// Only the first turn executes a historical retest. Follow-up conversation
+	// Only the first turn executes a historical run. Follow-up conversation
 	// turns may explain the sealed result; the result tool refuses to overwrite it.
-	finishStatus, finishReason := "failed", "复测未能启动"
-	if c.AgentKey == db.FindingRetestAgentKey {
+	finishStatus, finishReason := "failed", "复核/复测未能启动"
+	if c.AgentKey == db.FindingRetestAgentKey || c.AgentKey == db.FindingReviewAgentKey {
 		// Read without the run cancellation so an immediate stop still seals pending.
 		r, err := s.m.pg.FindingRetestForConversation(context.Background(), c.ID)
 		if err != nil {
 			// The sealing defer below needs r.ID, which we do not have here. Seal by
 			// conversation instead, otherwise the row stays 'pending' forever.
 			log.Printf("[conv %d] load retest: %v", c.ID, err)
-			if err := s.m.pg.FailPendingRetestForConversation(c.ID, "复测状态读取失败，请重新发起"); err != nil {
+			if err := s.m.pg.FailPendingRetestForConversation(c.ID, "复核/复测状态读取失败，请重新发起"); err != nil {
 				log.Printf("[conv %d] seal retest: %v", c.ID, err)
 			}
 			return
 		}
+		// Review runs narrow their tool set by scope (evidence-only => no shell /
+		// no WebFetch). Set on every turn so a follow-up question cannot regain
+		// network access the operator withheld.
+		if c.AgentKey == db.FindingReviewAgentKey && r != nil {
+			ctx = agent.WithReviewMode(ctx, reviewModeFromScope(r.Scope))
+		}
 		if r != nil && r.Status == "pending" {
 			defer func() {
 				if ctx.Err() != nil {
-					finishStatus, finishReason = "stopped", "复测已停止或服务已关闭"
+					finishStatus, finishReason = "stopped", "复核/复测已停止或服务已关闭"
 				}
 				s.finishRetest(r.ID, finishStatus, finishReason)
 			}()

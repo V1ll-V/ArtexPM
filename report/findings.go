@@ -85,6 +85,7 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(findingTrafficMarkdown(f, false))
+		b.WriteString(findingReviewMarkdown(f))
 		b.WriteString("---\n\n")
 	}
 	return b.String()
@@ -116,6 +117,7 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(findingTrafficMarkdown(f, true))
+	b.WriteString(findingReviewMarkdown(f))
 	return b.String()
 }
 
@@ -149,8 +151,12 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID"})
+	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID", "人工复核结论", "复核备注", "复核时间"})
 	for _, f := range items {
+		reviewedAt := ""
+		if f.ReviewedAt != nil {
+			reviewedAt = f.ReviewedAt.Format("2006-01-02 15:04:05")
+		}
 		_ = w.Write([]string{
 			fmt.Sprintf("%d", f.ID),
 			findingTitle(f),
@@ -161,6 +167,7 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 			f.CreatedAt.Format("2006-01-02 15:04:05"),
 			strings.TrimSpace(f.Summary),
 			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f),
+			reviewDecisionLabel(f.ReviewDecision), strings.TrimSpace(f.ReviewNote), reviewedAt,
 		})
 	}
 	w.Flush()
@@ -194,6 +201,44 @@ func findingTrafficMarkdown(f *db.DBFinding, attachments bool) string {
 		if attachments {
 			fmt.Fprintf(&out, "   [请求报文](evidence/%d/%d/request.http) · [响应报文](evidence/%d/%d/response.http)\n", f.ID, b.ID, f.ID, b.ID)
 		}
+	}
+	out.WriteString("\n")
+	return out.String()
+}
+
+// reviewDecisionLabel renders the human review decision for reports/exports.
+func reviewDecisionLabel(d string) string {
+	switch d {
+	case "confirmed":
+		return "成立"
+	case "false_positive":
+		return "误报"
+	case "exaggerated":
+		return "夸大"
+	case "inconclusive":
+		return "无法确认"
+	default:
+		return ""
+	}
+}
+
+// findingReviewMarkdown renders the human review section. Empty when the finding
+// has not been reviewed: an unreviewed finding should not claim anything.
+func findingReviewMarkdown(f *db.DBFinding) string {
+	if f.ReviewDecision == "" {
+		return ""
+	}
+	var out strings.Builder
+	out.WriteString("\n## 人工复核结论\n\n")
+	fmt.Fprintf(&out, "- **结论**：%s\n", reviewDecisionLabel(f.ReviewDecision))
+	if f.ReviewedAt != nil {
+		fmt.Fprintf(&out, "- **复核时间**：%s\n", f.ReviewedAt.Format("2006-01-02 15:04:05"))
+	}
+	if f.ReviewRunID != nil {
+		fmt.Fprintf(&out, "- **复核记录**：#%d\n", *f.ReviewRunID)
+	}
+	if note := strings.TrimSpace(f.ReviewNote); note != "" {
+		fmt.Fprintf(&out, "\n%s\n", note)
 	}
 	out.WriteString("\n")
 	return out.String()

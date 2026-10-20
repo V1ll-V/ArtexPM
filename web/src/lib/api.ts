@@ -41,6 +41,9 @@ import type {
   FindingGroupsPage,
   FindingQuery,
   FindingRetest,
+  FindingReviewDecision,
+  FindingReviewDecisionInfo,
+  FindingReviewScope,
   FindingStats,
   FindingStatus,
   FindingsPage,
@@ -681,6 +684,25 @@ export const api = {
     post<{ retest: FindingRetest; created: boolean }>(`/exploration/findings/${encodeURIComponent(id)}/retests`, {
       notes,
     }),
+  findingReviews: (id: string) =>
+    get<{ reviews: FindingRetest[]; decision: FindingReviewDecisionInfo }>(
+      `/exploration/findings/${encodeURIComponent(id)}/reviews`,
+    ).then((r) => ({ reviews: arr(r.reviews), decision: r.decision })),
+  startFindingReview: (id: string, feedback: string, scope: FindingReviewScope) =>
+    post<{ review: FindingRetest; created: boolean }>(`/exploration/findings/${encodeURIComponent(id)}/reviews`, {
+      feedback,
+      scope,
+    }),
+  decideFindingReview: (
+    id: string,
+    body: {
+      decision: FindingReviewDecision;
+      note?: string;
+      apply_status?: boolean;
+      severity?: Severity;
+      run_id?: number;
+    },
+  ) => patch<Finding>(`/exploration/findings/${encodeURIComponent(id)}/review`, body),
   deepenFinding: (id: string, description: string) =>
     post<FindingDeepenResponse>(`/exploration/findings/${id}/deepen`, { description }),
   intents: (task?: string) => get<TaskNode[]>(`/exploration/intents${tq(task)}`).then(arr),
@@ -825,8 +847,7 @@ export const api = {
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;

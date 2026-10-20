@@ -502,6 +502,10 @@ export interface Finding {
   summary: string;
   evidence: string;
   report?: string; // 详细报告(Markdown);仅详情接口返回,列表为空
+  review_decision?: FindingReviewDecision; // 人工复核最终判定;空=未复核
+  review_note?: string;
+  review_run_id?: string;
+  reviewed_at?: string;
   intent_id?: string;
   param_id?: string;
   task_id?: string;
@@ -713,10 +717,26 @@ export interface AgentTrigger {
 }
 
 // ---- Conversations (chat page) ----
+// 复核结论：Agent 每次运行给一个 verdict；人工最终判定用 FindingReviewDecision。
+export type FindingReviewVerdict = "confirmed" | "false_positive" | "exaggerated" | "inconclusive";
+export type FindingReviewDecision = "" | FindingReviewVerdict;
+export type FindingReviewMode = "evidence_only" | "minimal_verification";
+export type FindingReviewConfidence = "" | "low" | "medium" | "high";
+
+export interface FindingReviewScope {
+  mode: FindingReviewMode;
+  focus?: string[];
+  allow_network?: boolean;
+  max_requests?: number;
+  forbidden?: string;
+  assets?: number[];
+}
+
 export interface ActiveFindingRetest {
   id: number;
   finding_id: string;
   conversation_id: number;
+  kind?: "fix_verify" | "triage";
   status: "pending" | "running";
 }
 
@@ -724,15 +744,29 @@ export interface FindingRetest {
   id: number;
   finding_id: number;
   conversation_id: number | null;
+  kind: "fix_verify" | "triage";
   status: "pending" | "running" | "completed" | "failed" | "stopped";
-  verdict: "" | "reproduced" | "fixed" | "inconclusive";
+  verdict: "" | "reproduced" | "fixed" | "inconclusive" | FindingReviewVerdict;
   notes: string;
+  feedback: string;
+  scope?: FindingReviewScope;
+  confidence: FindingReviewConfidence;
+  recommended_severity: "" | Severity;
+  recommended_status: "" | "confirmed" | "false_positive";
   summary: string;
   evidence: string;
   error: string;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+// FindingReviewDecisionInfo 是漏洞上已保存的人工复核判定。
+export interface FindingReviewDecisionInfo {
+  review_decision: FindingReviewDecision;
+  review_note: string;
+  review_run_id: number | null;
+  reviewed_at: string | null;
 }
 
 export interface Conversation {

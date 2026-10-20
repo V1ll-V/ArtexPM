@@ -10,29 +10,67 @@ import (
 	"time"
 )
 
+// FindingRetestAgentKey is the editable conversation agent that performs
+// post-fix verification (reproduced / fixed / inconclusive).
 const FindingRetestAgentKey = "retester"
+
+// FindingReviewAgentKey is the editable conversation agent that performs a
+// triage review after a human flags a finding as doubtful (false positive /
+// exaggerated / confirmed / inconclusive). It only records a recommendation;
+// the human decision is stored on findings.review_decision.
+const FindingReviewAgentKey = "reviewer"
+
+// Run kinds share one table and one conversation lifecycle, but differ in
+// verdict vocabulary and side effects.
+const (
+	FindingRunFixVerify = "fix_verify" // 修复后复测
+	FindingRunTriage    = "triage"     // 人工复核（误报/夸大判定）
+)
+
+// ValidFindingRunKind reports whether k is a known finding-run kind.
+func ValidFindingRunKind(k string) bool {
+	return k == FindingRunFixVerify || k == FindingRunTriage
+}
+
+// ValidFindingReviewVerdict reports whether v is an agent review verdict.
+func ValidFindingReviewVerdict(v string) bool {
+	switch v {
+	case "confirmed", "false_positive", "exaggerated", "inconclusive":
+		return true
+	}
+	return false
+}
 
 var ErrRetestNotRunning = errors.New("本次复测已结束或尚未开始，请从漏洞详情发起新的复测")
 
-// FindingRetest is an immutable historical test once its conversation turn ends.
-// Snapshot is only loaded for the agent, never sent with the history list.
+// FindingRetest is one finding-scoped agent run. It is immutable once its
+// conversation turn ends. Snapshot is only loaded for the agent, never sent with
+// the history list.
 type FindingRetest struct {
-	ID             int64           `json:"id"`
-	FindingID      int64           `json:"finding_id"`
-	ConversationID *int64          `json:"conversation_id"`
-	Status         string          `json:"status"`
-	Verdict        string          `json:"verdict"`
-	Notes          string          `json:"notes"`
-	Snapshot       json.RawMessage `json:"snapshot,omitempty"`
-	Summary        string          `json:"summary"`
-	Evidence       string          `json:"evidence"`
-	Error          string          `json:"error"`
-	CreatedAt      time.Time       `json:"created_at"`
-	StartedAt      *time.Time      `json:"started_at"`
-	FinishedAt     *time.Time      `json:"finished_at"`
+	ID                  int64           `json:"id"`
+	FindingID           int64           `json:"finding_id"`
+	ConversationID      *int64          `json:"conversation_id"`
+	Kind                string          `json:"kind"`
+	Status              string          `json:"status"`
+	Verdict             string          `json:"verdict"`
+	Notes               string          `json:"notes"`
+	Feedback            string          `json:"feedback"`
+	Scope               json.RawMessage `json:"scope,omitempty"`
+	Confidence          string          `json:"confidence"`
+	RecommendedSeverity string          `json:"recommended_severity"`
+	RecommendedStatus   string          `json:"recommended_status"`
+	Snapshot            json.RawMessage `json:"snapshot,omitempty"`
+	Summary             string          `json:"summary"`
+	Evidence            string          `json:"evidence"`
+	Error               string          `json:"error"`
+	CreatedAt           time.Time       `json:"created_at"`
+	StartedAt           *time.Time      `json:"started_at"`
+	FinishedAt          *time.Time      `json:"finished_at"`
 }
 
-const retestCols = `id, finding_id, conversation_id, status, verdict, notes, summary, evidence, error, created_at, started_at, finished_at`
+const retestCols = `id, finding_id, conversation_id, kind, status, verdict, notes, feedback, scope,
+	confidence, recommended_severity, recommended_status, summary, evidence, error,
+	created_at, started_at, finished_at`
 
 // ActiveFindingRetest is the small status payload polled by the findings list.
 // Finding IDs use the same string representation as the findings API.
@@ -40,11 +78,12 @@ type ActiveFindingRetest struct {
 	ID             int64  `json:"id"`
 	FindingID      int64  `json:"finding_id,string"`
 	ConversationID int64  `json:"conversation_id"`
+	Kind           string `json:"kind"`
 	Status         string `json:"status"`
 }
 
 func (d *DB) ListActiveFindingRetests(ctx context.Context) ([]ActiveFindingRetest, error) {
-	rows, err := d.QueryContext(ctx, `SELECT id, finding_id, conversation_id, status FROM finding_retests
+	rows, err := d.QueryContext(ctx, `SELECT id, finding_id, conversation_id, kind, status FROM finding_retests
 	WHERE status IN ('pending','running') AND conversation_id IS NOT NULL ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -53,7 +92,7 @@ func (d *DB) ListActiveFindingRetests(ctx context.Context) ([]ActiveFindingRetes
 	items := []ActiveFindingRetest{}
 	for rows.Next() {
 		var item ActiveFindingRetest
-		if err := rows.Scan(&item.ID, &item.FindingID, &item.ConversationID, &item.Status); err != nil {
+		if err := rows.Scan(&item.ID, &item.FindingID, &item.ConversationID, &item.Kind, &item.Status); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -63,23 +102,52 @@ func (d *DB) ListActiveFindingRetests(ctx context.Context) ([]ActiveFindingRetes
 
 func scanRetest(row interface{ Scan(...any) error }) (*FindingRetest, error) {
 	r := &FindingRetest{}
-	err := row.Scan(&r.ID, &r.FindingID, &r.ConversationID, &r.Status, &r.Verdict, &r.Notes,
+	var scope []byte
+	err := row.Scan(&r.ID, &r.FindingID, &r.ConversationID, &r.Kind, &r.Status, &r.Verdict, &r.Notes,
+		&r.Feedback, &scope, &r.Confidence, &r.RecommendedSeverity, &r.RecommendedStatus,
 		&r.Summary, &r.Evidence, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if len(scope) > 0 {
+		r.Scope = json.RawMessage(scope)
 	}
 	return r, err
 }
 
 // CreateFindingRetest atomically snapshots the source, creates its conversation
 // and persists the first message. A finding row lock deduplicates simultaneous
-// clicks across clients; an existing active run is returned without dispatching.
+// clicks across clients; an existing active run of the same kind is returned
+// without dispatching.
 func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes string) (*FindingRetest, *Conversation, bool, error) {
+	return d.createFindingRun(ctx, findingID, FindingRunFixVerify, notes, "", nil)
+}
+
+// CreateFindingReview is the triage counterpart: feedback carries the human's
+// doubts, scope carries the conditions for this review (evidence-only vs
+// minimal verification, allowed assets, request budget ...).
+func (d *DB) CreateFindingReview(ctx context.Context, findingID int64, feedback string, scope json.RawMessage) (*FindingRetest, *Conversation, bool, error) {
+	return d.createFindingRun(ctx, findingID, FindingRunTriage, "", feedback, scope)
+}
+
+func (d *DB) createFindingRun(ctx context.Context, findingID int64, kind, notes, feedback string, scope json.RawMessage) (*FindingRetest, *Conversation, bool, error) {
+	if !ValidFindingRunKind(kind) {
+		return nil, nil, false, fmt.Errorf("bad finding run kind: %s", kind)
+	}
+	if len(scope) == 0 {
+		scope = json.RawMessage(`{}`)
+	}
+	agentKey := FindingRetestAgentKey
+	titlePrefix := "复测"
+	if kind == FindingRunTriage {
+		agentKey = FindingReviewAgentKey
+		titlePrefix = "复核"
+	}
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var title string
 	var snapshot []byte
 	err = tx.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(f.name,''), NULLIF(f.vulnclass,''), '未分类'),
@@ -90,7 +158,8 @@ func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes str
 	if err != nil {
 		return nil, nil, false, err
 	}
-	r, err := scanRetest(tx.QueryRowContext(ctx, `SELECT `+retestCols+` FROM finding_retests WHERE finding_id=$1 AND status IN ('pending','running')`, findingID))
+	r, err := scanRetest(tx.QueryRowContext(ctx, `SELECT `+retestCols+` FROM finding_retests
+		WHERE finding_id=$1 AND kind=$2 AND status IN ('pending','running')`, findingID, kind))
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -102,18 +171,19 @@ func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes str
 		title = string(runes[:100])
 	}
 	c, err := scanConv(tx.QueryRowContext(ctx, `INSERT INTO conversations(agent_key,title) VALUES ($1,$2) RETURNING `+convCols,
-		FindingRetestAgentKey, fmt.Sprintf("复测 #%d · %s", findingID, title)))
+		agentKey, fmt.Sprintf("%s #%d · %s", titlePrefix, findingID, title)))
 	if err != nil {
 		return nil, nil, false, err
 	}
-	r, err = scanRetest(tx.QueryRowContext(ctx, `INSERT INTO finding_retests(finding_id,conversation_id,notes,snapshot) VALUES ($1,$2,$3,$4) RETURNING `+retestCols,
-		findingID, c.ID, strings.TrimSpace(notes), snapshot))
+	r, err = scanRetest(tx.QueryRowContext(ctx, `INSERT INTO finding_retests(finding_id,conversation_id,kind,notes,feedback,scope,snapshot)
+		VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING `+retestCols,
+		findingID, c.ID, kind, strings.TrimSpace(notes), strings.TrimSpace(feedback), string(scope), snapshot))
 	if err != nil {
 		return nil, nil, false, err
 	}
 	msg := r.InitialMessage()
 	_, err = tx.ExecContext(ctx, `INSERT INTO conversation_activities(conversation_id,worker,kind,summary,detail) VALUES ($1,$2,'user',$3,$4)`,
-		c.ID, FindingRetestAgentKey, fmt.Sprintf("请复测漏洞 #%d", findingID), msg)
+		c.ID, agentKey, fmt.Sprintf("请%s漏洞 #%d", titlePrefix, findingID), msg)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -124,6 +194,13 @@ func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes str
 }
 
 func (r *FindingRetest) InitialMessage() string {
+	if r.Kind == FindingRunTriage {
+		msg := fmt.Sprintf("请复核漏洞 #%d。先调用 get_finding_review_context 读取本会话关联的原漏洞证据、报告、流量、执行过程、人工审查意见与本次复核条件，再按条件复核，最后调用 record_finding_review_result 保存结论。", r.FindingID)
+		if r.Feedback != "" {
+			msg += "\n\n人工审查意见（本次复核要重点核实的疑点）：\n" + r.Feedback
+		}
+		return msg
+	}
 	msg := fmt.Sprintf("请复测漏洞 #%d。先调用 get_finding_retest_context 读取本会话关联的原始证据与约束，再执行针对性验证，最后调用 record_finding_retest_result 保存结论。", r.FindingID)
 	if r.Notes != "" {
 		msg += "\n\n本次复测补充说明：\n" + r.Notes
@@ -157,8 +234,8 @@ func (d *DB) FindingRetestForConversation(ctx context.Context, conversationID in
 	return r, err
 }
 
-// FailPendingRetestForConversation seals a conversation's unfinished retest when
-// the runner could not even load it — the retest ID is unknown on that path, so
+// FailPendingRetestForConversation seals a conversation's unfinished run when
+// the runner could not even load it — the run ID is unknown on that path, so
 // the conversation ID is the only handle. Without it a transient read error
 // leaves the row 'pending' forever: the findings list keeps showing 复测中 and
 // every later 发起复测 is deduped against a run that is not happening, with only
@@ -192,7 +269,47 @@ func (d *DB) RecordFindingRetestResult(ctx context.Context, conversationID int64
 		return errors.New("复测结论过长（summary ≤ 16KB，evidence ≤ 128KB）")
 	}
 	res, err := d.ExecContext(ctx, `UPDATE finding_retests SET verdict=$2,summary=$3,evidence=$4
-	WHERE conversation_id=$1 AND status='running' AND (verdict='' OR (verdict=$2 AND summary=$3 AND evidence=$4))`, conversationID, verdict, summary, evidence)
+	WHERE conversation_id=$1 AND kind='fix_verify' AND status='running'
+	  AND (verdict='' OR (verdict=$2 AND summary=$3 AND evidence=$4))`, conversationID, verdict, summary, evidence)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrRetestNotRunning
+	}
+	return nil
+}
+
+// RecordFindingReviewResult saves the agent's recommendation for a triage run.
+// It never touches findings: the human decides whether to adopt it.
+func (d *DB) RecordFindingReviewResult(ctx context.Context, conversationID int64, verdict, confidence, summary, evidence, recommendedSeverity, recommendedStatus string) error {
+	if !ValidFindingReviewVerdict(verdict) {
+		return errors.New("verdict 必须为 confirmed / false_positive / exaggerated / inconclusive")
+	}
+	if confidence != "" && confidence != "low" && confidence != "medium" && confidence != "high" {
+		return errors.New("confidence 必须为 low / medium / high（可空）")
+	}
+	if recommendedSeverity != "" && !ValidSeverity(recommendedSeverity) {
+		return errors.New("recommended_severity 必须为 critical / high / medium / low（可空）")
+	}
+	if recommendedStatus != "" && recommendedStatus != FindingConfirmed && recommendedStatus != FindingFalsePositive {
+		return errors.New("recommended_status 只能为 confirmed / false_positive（可空）")
+	}
+	summary, evidence = strings.TrimSpace(summary), strings.TrimSpace(evidence)
+	if summary == "" || evidence == "" {
+		return errors.New("summary 与 evidence 不能为空；无法确认时说明实际检查及阻塞原因")
+	}
+	if len(summary) > 16000 || len(evidence) > 128000 {
+		return errors.New("复核结论过长（summary ≤ 16KB，evidence ≤ 128KB）")
+	}
+	res, err := d.ExecContext(ctx, `UPDATE finding_retests
+		SET verdict=$2, confidence=$3, summary=$4, evidence=$5,
+		    recommended_severity=$6, recommended_status=$7
+		WHERE conversation_id=$1 AND kind='triage' AND status='running'
+		  AND (verdict='' OR (verdict=$2 AND summary=$4 AND evidence=$5))`,
+		conversationID, verdict, confidence, summary, evidence, recommendedSeverity, recommendedStatus)
 	if err != nil {
 		return err
 	}
@@ -206,7 +323,10 @@ func (d *DB) RecordFindingRetestResult(ctx context.Context, conversationID int64
 
 // FinishFindingRetest seals the result. Cancellation/failure takes precedence
 // over a staged verdict so an interrupted test cannot appear successfully fixed.
-// Only a newly completed fixed verdict updates triage, in the same transaction.
+//
+// Only a newly completed fix_verify run with verdict='fixed' updates triage, in
+// the same transaction. Triage runs never change findings automatically — the
+// human adopts or overrides their recommendation via SetFindingReviewDecision.
 func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 	if status != "completed" && status != "failed" && status != "stopped" {
 		return errors.New("invalid terminal retest status")
@@ -215,7 +335,7 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Lock the finding before the retest, matching creation and cascading deletion.
 	var findingID int64
 	err = tx.QueryRow(`SELECT f.id FROM findings f WHERE f.id=(SELECT finding_id FROM finding_retests WHERE id=$1) FOR UPDATE OF f`, id).Scan(&findingID)
@@ -225,18 +345,18 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 	if err != nil {
 		return err
 	}
-	var finalStatus, verdict string
+	var finalStatus, verdict, kind string
 	err = tx.QueryRow(`UPDATE finding_retests SET
 	status=CASE WHEN $2='completed' AND verdict='' THEN 'failed' ELSE $2 END,
-	error=CASE WHEN $2='completed' AND verdict='' THEN 'Agent 未保存复测结论，请查看会话后重新复测' ELSE $3 END,
-	finished_at=now() WHERE id=$1 AND status IN ('pending','running') RETURNING status,verdict`, id, status, reason).Scan(&finalStatus, &verdict)
+	error=CASE WHEN $2='completed' AND verdict='' THEN 'Agent 未保存结论，请查看会话后重新发起' ELSE $3 END,
+	finished_at=now() WHERE id=$1 AND status IN ('pending','running') RETURNING status,verdict,kind`, id, status, reason).Scan(&finalStatus, &verdict, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // A replay must not overwrite a later manual triage decision.
 	}
 	if err != nil {
 		return err
 	}
-	if finalStatus == "completed" && verdict == "fixed" {
+	if finalStatus == "completed" && kind == FindingRunFixVerify && verdict == "fixed" {
 		// 走带通知的版本，与人工在详情页改状态共用同一套语义。
 		//
 		// 此前这里是裸的 UPDATE：复测判「已修复」时状态确实变了，但配了
@@ -254,6 +374,6 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 }
 
 func (d *DB) RecoverFindingRetests() error {
-	_, err := d.Exec(`UPDATE finding_retests SET status='stopped', error='服务重启，复测已中断，请重新发起', finished_at=now() WHERE status IN ('pending','running')`)
+	_, err := d.Exec(`UPDATE finding_retests SET status='stopped', error='服务重启，复核/复测已中断，请重新发起', finished_at=now() WHERE status IN ('pending','running')`)
 	return err
 }

@@ -1097,25 +1097,45 @@ CREATE TABLE IF NOT EXISTS findings (
     status      TEXT NOT NULL DEFAULT 'pending',
     -- 漏洞详细报告(Markdown)；默认空,仅详情页读取/展示,不进列表接口以免 payload 膨胀。
     report      TEXT NOT NULL DEFAULT '',
+    -- 人工复核的人工最终判定(空=未复核)。与 finding_retests.verdict(Agent 每次运行
+    -- 的结论)分开存放：Agent 只给建议，这里记录人拍板后的结果与备注。
+    review_decision TEXT NOT NULL DEFAULT '',
+    review_note     TEXT NOT NULL DEFAULT '',
+    review_run_id   BIGINT,
+    reviewed_at     TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS review_decision TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS review_note     TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS review_run_id   BIGINT;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS reviewed_at     TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_findings_review ON findings(review_decision) WHERE review_decision <> '';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
 -- 「按资产」视图靠 asset_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
 CREATE INDEX IF NOT EXISTS idx_findings_asset_ids ON findings USING GIN(asset_ids jsonb_path_ops);
 
--- 手动复测属于独立会话；结论与原漏洞处置状态分开保存。
+-- 漏洞级运行（修复复测 / 人工复核）属于独立会话；结论与原漏洞处置状态分开保存。
 CREATE TABLE IF NOT EXISTS finding_retests (
     id BIGSERIAL PRIMARY KEY,
     finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     conversation_id BIGINT UNIQUE REFERENCES conversations(id) ON DELETE SET NULL,
+    -- fix_verify 修复后复测 / triage 人工复核（误报、夸大判定）
+    kind TEXT NOT NULL DEFAULT 'fix_verify',
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed','stopped')),
-    verdict TEXT NOT NULL DEFAULT '' CHECK (verdict IN ('','reproduced','fixed','inconclusive')),
+    verdict TEXT NOT NULL DEFAULT '' CHECK (verdict IN ('','reproduced','fixed','inconclusive','confirmed','false_positive','exaggerated')),
     notes TEXT NOT NULL DEFAULT '',
+    -- feedback 是人工复核时用户填写的审查意见/疑点；scope 是本次复核的条件
+    -- (evidence_only / minimal_verification、允许的资产、请求上限等)。
+    feedback TEXT NOT NULL DEFAULT '',
+    scope JSONB NOT NULL DEFAULT '{}'::jsonb,
+    confidence TEXT NOT NULL DEFAULT '',
+    recommended_severity TEXT NOT NULL DEFAULT '',
+    recommended_status TEXT NOT NULL DEFAULT '',
     snapshot JSONB NOT NULL,
     summary TEXT NOT NULL DEFAULT '',
     evidence TEXT NOT NULL DEFAULT '',
@@ -1124,14 +1144,55 @@ CREATE TABLE IF NOT EXISTS finding_retests (
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ
 );
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'fix_verify';
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS feedback TEXT NOT NULL DEFAULT '';
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS scope JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS confidence TEXT NOT NULL DEFAULT '';
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS recommended_severity TEXT NOT NULL DEFAULT '';
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS recommended_status TEXT NOT NULL DEFAULT '';
+
+-- 旧库的 verdict CHECK 是内联匿名约束，先删掉所有非本版本的 verdict 约束，再按需安装
+-- 具名约束，避免每次启动都全表校验。
+DO $$
+DECLARE c record;
+BEGIN
+    FOR c IN
+        SELECT conname FROM pg_constraint
+         WHERE conrelid='finding_retests'::regclass AND contype='c'
+           AND pg_get_constraintdef(oid) LIKE '%verdict%'
+           AND conname <> 'ck_finding_retests_verdict'
+    LOOP
+        EXECUTE 'ALTER TABLE finding_retests DROP CONSTRAINT '||quote_ident(c.conname);
+    END LOOP;
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid='finding_retests'::regclass AND conname='ck_finding_retests_verdict'
+    ) THEN
+        ALTER TABLE finding_retests ADD CONSTRAINT ck_finding_retests_verdict CHECK (verdict IN (
+            '','reproduced','fixed','inconclusive','confirmed','false_positive','exaggerated'
+        ));
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_finding_retests_history ON finding_retests(finding_id, id DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_retests_active ON finding_retests(finding_id)
+CREATE INDEX IF NOT EXISTS idx_finding_retests_kind ON finding_retests(kind, id DESC);
+-- 同一漏洞可以同时有一条修复复测和一条人工复核，但同类只能有一条进行中。
+DROP INDEX IF EXISTS idx_finding_retests_active;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_retests_active_kind ON finding_retests(finding_id, kind)
     WHERE status IN ('pending','running');
 
--- 删除会话保留复测记录，同时解除尚未结束的复测占用。
+-- findings.review_run_id 指向触发人工判定的那次复核运行。刻意不建外键：
+-- finding 删除会级联删除 finding_retests，若再加 SET NULL 外键就是同一条
+-- 命令里「删父行 + 回写父行」的循环级联，容易触发 PG 的元组重写冲突。
+-- 归属在 SetFindingReviewDecision 写入时校验，读侧只当审计指针展示。
+
+-- 删除会话保留复测/复核记录，同时解除尚未结束的运行占用。
 CREATE OR REPLACE FUNCTION stop_deleted_conversation_retest() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    UPDATE finding_retests SET status='stopped', error='复测会话已删除', finished_at=now()
+    UPDATE finding_retests SET status='stopped', error='复核/复测会话已删除', finished_at=now()
     WHERE conversation_id=OLD.id AND status IN ('pending','running');
     RETURN OLD;
 END;

@@ -25,7 +25,7 @@ const statusLabels = {
   failed: "复测失败",
   stopped: "已停止",
 };
-const verdictLabels = { reproduced: "仍可复现", fixed: "已修复", inconclusive: "无法确认" };
+const verdictLabels: Record<string, string> = { reproduced: "仍可复现", fixed: "已修复", inconclusive: "无法确认" };
 
 function active(r: FindingRetest) {
   return r.status === "pending" || r.status === "running";
@@ -51,7 +51,7 @@ export function FindingRetestPanel({
   const load = React.useCallback(async () => {
     const seq = ++requestSeq.current;
     try {
-      const rows = await api.findingRetests(findingId);
+      const rows = (await api.findingRetests(findingId)).filter((row) => row.kind !== "triage");
       if (seq !== requestSeq.current) return;
       const completed = previousItems.current.some(
         (item) => active(item) && rows.some((row) => row.id === item.id && !active(row)),
@@ -84,8 +84,8 @@ export function FindingRetestPanel({
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1.5">
-          <CardTitle>漏洞复测</CardTitle>
-          <CardDescription>在独立会话中验证当前状态，保留每次复测的结论与证据。</CardDescription>
+          <CardTitle>修复复测</CardTitle>
+          <CardDescription>修复部署后，在独立会话中验证漏洞是否仍可复现，保留每次复测的结论与证据。</CardDescription>
         </div>
         {running?.conversation_id != null ? (
           <Button asChild variant="outline" size="sm">

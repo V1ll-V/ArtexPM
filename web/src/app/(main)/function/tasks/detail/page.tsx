@@ -56,7 +56,7 @@ const TABS = [
   { value: "graph", label: "探索链路" },
   { value: "broadcast", label: "播报板" },
   { value: "findings", label: "发现" },
-  { value: "retests", label: "复测" },
+  { value: "retests", label: "复核与复测" },
   { value: "assets", label: "测试资产" },
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },

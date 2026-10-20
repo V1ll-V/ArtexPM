@@ -10,6 +10,7 @@ import {
   FileTextIcon,
   FlaskConicalIcon,
   RotateCcwIcon,
+  ScanSearchIcon,
   ShieldAlertIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -103,7 +104,9 @@ interface FindingsTableProps {
   onSave: (finding: Finding) => void;
   onStatusChange: (finding: Finding, next: FindingStatus) => void;
   onRetest: (finding: Finding) => void;
+  onReview: (finding: Finding) => void;
   activeRetests: Record<string, ActiveFindingRetest>;
+  activeReviews: Record<string, ActiveFindingRetest>;
   onDeepen: (finding: Finding) => void;
   onDelete: (finding: Finding) => void;
   /** 全选框的无障碍标签,平铺视图与分组视图措辞不同。 */
@@ -126,7 +129,9 @@ export function FindingsTable({
   onSave,
   onStatusChange,
   onRetest,
+  onReview,
   activeRetests,
+  activeReviews,
   onDeepen,
   onDelete,
   selectAllLabel = "选择当前页全部",
@@ -167,6 +172,7 @@ export function FindingsTable({
           const rowKey = findingRowKey(f);
           const open = expandedKey === rowKey;
           const retest = f.finding_id ? activeRetests[f.finding_id] : undefined;
+          const review = f.finding_id ? activeReviews[f.finding_id] : undefined;
           return (
             <React.Fragment key={rowKey}>
               <TableRow
@@ -272,6 +278,25 @@ export function FindingsTable({
                 <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(f.ts)}</TableCell>
                 <TableCell onClick={(e) => e.stopPropagation()}>
                   <div className="flex items-center gap-1">
+                    {review ? (
+                      <Button asChild size="sm" variant="ghost">
+                        <Link href={`/chat?c=${review.conversation_id}`} title="查看正在进行的复核会话">
+                          <Spinner data-icon="inline-start" />
+                          复核中
+                        </Link>
+                      </Button>
+                    ) : null}
+                    {!review && f.finding_id && !f.inherited ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onReview(f)}
+                        title="人工审查后复核该漏洞是否误报/夸大"
+                      >
+                        <ScanSearchIcon data-icon="inline-start" />
+                        复核
+                      </Button>
+                    ) : null}
                     {retest ? (
                       <Button asChild size="sm" variant="ghost">
                         <Link href={`/chat?c=${retest.conversation_id}`} title="查看正在进行的复测会话">

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { ArrowUpRightIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
+import { FindingReviewPanel } from "@/components/finding-review-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -84,7 +85,7 @@ export function RetestsTab({ taskId }: { taskId: string }) {
         <Card className="min-w-0">
           <CardHeader>
             <CardTitle>选择漏洞{data ? ` · ${data.total}` : ""}</CardTitle>
-            <CardDescription>查看本任务漏洞的复测记录，或发起新的复测。</CardDescription>
+            <CardDescription>查看本任务漏洞的人工复核与修复复测记录，或发起新的复核。</CardDescription>
           </CardHeader>
           <CardContent className="flex max-h-[32rem] flex-col overflow-y-auto">
             {!loaded && !error ? <Skeleton className="h-24 w-full" /> : null}
@@ -154,6 +155,12 @@ export function RetestsTab({ taskId }: { taskId: string }) {
               </div>
               <p className="line-clamp-3 break-words text-muted-foreground text-sm">{selected.summary}</p>
             </div>
+            <FindingReviewPanel
+              key={`review-${selected.id}`}
+              findingId={selected.finding_id || selected.id}
+              findingName={findingLabel(selected)}
+              onChanged={refresh}
+            />
             <FindingRetestPanel
               key={selected.id}
               findingId={selected.finding_id || selected.id}

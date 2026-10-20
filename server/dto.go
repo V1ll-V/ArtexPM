@@ -318,6 +318,11 @@ type FindingDTO struct {
 	Summary   string `json:"summary"`
 	Evidence  string `json:"evidence"`
 	Report    string `json:"report,omitempty"` // 详细报告(Markdown);仅详情接口返回,列表为空
+	// 人工复核的人工最终判定（空=未复核）；Agent 每次运行的结论在复核记录里。
+	ReviewDecision string `json:"review_decision,omitempty"`
+	ReviewNote     string `json:"review_note,omitempty"`
+	ReviewRunID    string `json:"review_run_id,omitempty"`
+	ReviewedAt     string `json:"reviewed_at,omitempty"`
 
 	IntentID        string            `json:"intent_id,omitempty"`
 	ParamID         string            `json:"param_id,omitempty"`
@@ -448,14 +453,22 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		FindingID:    i64s(f.ID),
 		TrafficCount: f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
 		ReportStale: f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion, TrafficBindings: f.TrafficBindings,
-		VulnClass: f.VulnClass,
-		Name:      f.Name,
-		Severity:  f.Severity,
-		Status:    status,
-		Summary:   f.Summary,
-		Evidence:  f.Evidence,
-		Report:    f.Report,
-		TS:        rfc3339(f.CreatedAt),
+		VulnClass:      f.VulnClass,
+		Name:           f.Name,
+		Severity:       f.Severity,
+		Status:         status,
+		Summary:        f.Summary,
+		Evidence:       f.Evidence,
+		Report:         f.Report,
+		ReviewDecision: f.ReviewDecision,
+		ReviewNote:     f.ReviewNote,
+		TS:             rfc3339(f.CreatedAt),
+	}
+	if f.ReviewRunID != nil {
+		d.ReviewRunID = i64s(*f.ReviewRunID)
+	}
+	if f.ReviewedAt != nil {
+		d.ReviewedAt = rfc3339(*f.ReviewedAt)
 	}
 	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
 	if f.TaskID != nil {

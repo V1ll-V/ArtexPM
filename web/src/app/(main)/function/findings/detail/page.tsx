@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
+import { FindingReviewPanel } from "@/components/finding-review-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
@@ -147,6 +148,7 @@ function FindingDetailInner() {
           <Separator orientation="vertical" className="mx-1 h-4" />
           <StatusBadge domain="severity" value={finding.severity} dot />
           <StatusBadge domain="finding" value={finding.status} dot />
+          {finding.review_decision ? <StatusBadge domain="review" value={finding.review_decision} dot /> : null}
           {finding.inherited && finding.source_task_id && (
             <Badge variant="outline">来源任务 #{finding.source_task_id} · 只读</Badge>
           )}
@@ -172,6 +174,13 @@ function FindingDetailInner() {
                   <p className="text-sm leading-relaxed whitespace-pre-wrap">{finding.summary || "（无摘要）"}</p>
                 </CardContent>
               </Card>
+              <FindingReviewPanel
+                key={`review-${id}`}
+                findingId={id}
+                findingName={title}
+                inherited={finding.inherited}
+                onChanged={load}
+              />
               <FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
               <Card>
                 <CardHeader>
@@ -201,6 +210,17 @@ function FindingDetailInner() {
                   {finding.report && <CopyButton text={finding.report} successMessage="已复制详细报告" />}
                 </CardHeader>
                 <CardContent>
+                  {finding.review_decision ? (
+                    <Alert className="mb-3">
+                      <AlertDescription className="flex flex-wrap items-center gap-2">
+                        人工复核结论：
+                        <StatusBadge domain="review" value={finding.review_decision} dot />
+                        {finding.review_note ? (
+                          <span className="min-w-0 break-words text-muted-foreground">{finding.review_note}</span>
+                        ) : null}
+                      </AlertDescription>
+                    </Alert>
+                  ) : null}
                   {finding.report_stale ? (
                     <Alert>
                       <AlertDescription>流量证据已变更，详细报告待更新。</AlertDescription>

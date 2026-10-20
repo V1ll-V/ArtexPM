@@ -75,6 +75,15 @@ const finding: Record<string, StatusMeta> = {
   risk_accepted: { label: "风险接受", tone: "violet" },
 };
 
+// 人工复核结论。与 finding 状态分开：复核结论描述「这个漏洞是否成立」，
+// finding 状态描述「怎么处置」。
+const review: Record<string, StatusMeta> = {
+  confirmed: { label: "成立", tone: "green" },
+  false_positive: { label: "误报", tone: "slate" },
+  exaggerated: { label: "夸大", tone: "amber" },
+  inconclusive: { label: "无法确认", tone: "neutral" },
+};
+
 const engine: Record<string, StatusMeta> = {
   exploring: { label: "探索中", tone: "blue" },
   paused: { label: "已暂停", tone: "amber" },
@@ -114,6 +123,7 @@ const maps = {
   task,
   severity,
   finding,
+  review,
   engine,
   goal,
   audit,

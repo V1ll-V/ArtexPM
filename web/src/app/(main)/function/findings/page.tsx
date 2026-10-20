@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner";
 
 import { FindingRetestDialog } from "@/components/finding-retest-dialog";
+import { FindingReviewDialog } from "@/components/finding-review-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { Button } from "@/components/ui/button";
@@ -155,8 +156,10 @@ export default function FindingsPage() {
   const [pageSize, setPageSize] = React.useState(10);
   const [deepenFinding, setDeepenFinding] = React.useState<Finding | null>(null);
   const [retestFinding, setRetestFinding] = React.useState<Finding | null>(null);
+  const [reviewFinding, setReviewFinding] = React.useState<Finding | null>(null);
   const [activeRetests, setActiveRetests] = React.useState<Record<string, ActiveFindingRetest>>({});
-  const activeRetestFingerprint = Object.values(activeRetests)
+  const [activeReviews, setActiveReviews] = React.useState<Record<string, ActiveFindingRetest>>({});
+  const activeRetestFingerprint = [...Object.values(activeRetests), ...Object.values(activeReviews)]
     .map((item) => item.id)
     .join(",");
   const retestRefreshVersion = React.useRef(0);
@@ -176,10 +179,17 @@ export default function FindingsPage() {
       try {
         const rows = await api.activeFindingRetests();
         if (disposed || version !== retestRefreshVersion.current) return;
-        setActiveRetests(Object.fromEntries(rows.map((item) => [item.finding_id, item])));
+        const retests: Record<string, ActiveFindingRetest> = {};
+        const reviews: Record<string, ActiveFindingRetest> = {};
+        for (const item of rows) {
+          if (item.kind === "triage") reviews[item.finding_id] = item;
+          else retests[item.finding_id] = item;
+        }
+        setActiveRetests(retests);
+        setActiveReviews(reviews);
         failed = false;
       } catch (error) {
-        if (!disposed && !failed) toast.error(`加载复测状态失败：${(error as Error).message}`);
+        if (!disposed && !failed) toast.error(`加载复核/复测状态失败：${(error as Error).message}`);
         failed = true;
       } finally {
         if (!disposed) timer = setTimeout(() => void refreshRetests(), 3000);
@@ -781,7 +791,9 @@ export default function FindingsPage() {
     onSave: saveEdit,
     onStatusChange: updateStatus,
     onRetest: setRetestFinding,
+    onReview: setReviewFinding,
     activeRetests,
+    activeReviews,
     onDeepen: openDeepen,
     onDelete: deleteFinding,
   };
@@ -1146,6 +1158,28 @@ export default function FindingsPage() {
             setActiveRetests((current) => ({ ...current, [findingId]: active }));
           }}
           onClose={() => setRetestFinding(null)}
+        />
+      ) : null}
+
+      {reviewFinding?.finding_id ? (
+        <FindingReviewDialog
+          key={`review-${reviewFinding.finding_id}`}
+          findingId={reviewFinding.finding_id}
+          findingName={reviewFinding.name || reviewFinding.vulnclass || reviewFinding.summary}
+          onStarted={(review) => {
+            const findingId = reviewFinding.finding_id;
+            if (!findingId || review.conversation_id == null || !["pending", "running"].includes(review.status)) return;
+            retestRefreshVersion.current++;
+            const active: ActiveFindingRetest = {
+              id: review.id,
+              finding_id: findingId,
+              conversation_id: review.conversation_id,
+              kind: "triage",
+              status: review.status === "pending" ? "pending" : "running",
+            };
+            setActiveReviews((current) => ({ ...current, [findingId]: active }));
+          }}
+          onClose={() => setReviewFinding(null)}
         />
       ) : null}
 

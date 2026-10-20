@@ -20,18 +20,24 @@ type DBFinding struct {
 	ReportEvidenceVersion int64
 	TrafficBindings       []FindingTrafficBinding // populated only for export
 
-	ID              int64
-	TaskID          *int64
-	NodeID          *int64
-	VulnClass       string
-	Name            string // 漏洞名称(可读标题);为空时前端回退展示 VulnClass
-	Severity        string
-	Summary         string
-	Evidence        string
-	Worker          string
-	AssetIDs        []int64
-	Status          string
-	Report          string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
+	ID        int64
+	TaskID    *int64
+	NodeID    *int64
+	VulnClass string
+	Name      string // 漏洞名称(可读标题);为空时前端回退展示 VulnClass
+	Severity  string
+	Summary   string
+	Evidence  string
+	Worker    string
+	AssetIDs  []int64
+	Status    string
+	Report    string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
+	// 人工复核的人工最终判定（空=未复核）。Agent 每次运行的结论在
+	// finding_retests.verdict，这里只存人拍板后的结果。
+	ReviewDecision  string
+	ReviewNote      string
+	ReviewRunID     *int64
+	ReviewedAt      *time.Time
 	CreatedAt       time.Time
 	TaskDescription string // populated via LEFT JOIN on tasks
 }
@@ -54,6 +60,28 @@ func ValidFindingStatus(s string) bool {
 	switch s {
 	case FindingPending, FindingInProgress, FindingConfirmed, FindingResolved, FindingFixed,
 		FindingFalsePositive, FindingIgnored, FindingDuplicate, FindingRiskAccepted:
+		return true
+	}
+	return false
+}
+
+// Finding review decisions (findings.review_decision). Empty = not reviewed.
+// These are HUMAN decisions; an agent run's own verdict lives in
+// finding_retests.verdict. The two are kept apart so a later human override does
+// not rewrite the audit record of what the reviewer agent concluded.
+const (
+	FindingReviewNone          = ""
+	FindingReviewConfirmed     = "confirmed"      // 复核后确认漏洞成立
+	FindingReviewFalsePositive = "false_positive" // 复核判定误报
+	FindingReviewExaggerated   = "exaggerated"    // 漏洞成立但影响/等级被夸大
+	FindingReviewInconclusive  = "inconclusive"   // 无法确认
+)
+
+// ValidFindingReviewDecision reports whether s is a known human review decision.
+func ValidFindingReviewDecision(s string) bool {
+	switch s {
+	case FindingReviewNone, FindingReviewConfirmed, FindingReviewFalsePositive,
+		FindingReviewExaggerated, FindingReviewInconclusive:
 		return true
 	}
 	return false
@@ -105,7 +133,8 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.name, ''), f.severity, f.summary,
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
- (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id)`
+ (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),
+	 COALESCE(f.review_decision, ''), COALESCE(f.review_note, ''), f.review_run_id, f.reviewed_at`
 
 // scanFindings materializes rows selected via findingSelectCols.
 func scanFindings(rows interface {
@@ -118,7 +147,8 @@ func scanFindings(rows interface {
 		f := &DBFinding{}
 		var aidsJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount); err != nil {
+			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount,
+			&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
@@ -511,7 +541,8 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 		var aidsJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report); err != nil {
+			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount,
+			&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt, &f.Report); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
@@ -639,7 +670,8 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount,
+		&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt, &f.Report)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -700,6 +732,74 @@ func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// SetFindingReviewDecision records the human decision on one finding. decision
+// may be "" to clear it. applyStatus / severity are optional follow-ups applied
+// in the SAME transaction: status goes through SetFindingStatusTx so configured
+// notification channels still fire, and severity is mirrored onto the
+// originating exploration node just like SetFindingSeverity.
+//
+// runID, when non-nil, must reference a run that belongs to this finding; it is
+// an audit pointer only, never the source of truth for the decision.
+func (d *DB) SetFindingReviewDecision(ctx context.Context, id int64, decision, note string, runID *int64, applyStatus, severity *string) (found bool, err error) {
+	decision = strings.TrimSpace(decision)
+	note = strings.TrimSpace(note)
+	if !ValidFindingReviewDecision(decision) {
+		return false, fmt.Errorf("bad review decision: %s", decision)
+	}
+	if len([]rune(note)) > 8000 {
+		return false, errors.New("复核备注最多 8000 个字符")
+	}
+	if decision == FindingReviewNone {
+		// 清空判定时同时清掉备注与运行引用，避免留下一条「无结论但有备注」的脏记录。
+		note = ""
+		runID = nil
+	}
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var nodeID *int64
+	err = tx.QueryRowContext(ctx, `SELECT node_id FROM findings WHERE id=$1 FOR UPDATE`, id).Scan(&nodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	found = true
+	if runID != nil {
+		var ok bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM finding_retests WHERE id=$1 AND finding_id=$2)`, *runID, id).Scan(&ok); err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, errors.New("复核记录不属于该漏洞")
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE findings
+		SET review_decision=$2, review_note=$3, review_run_id=$4,
+		    reviewed_at=CASE WHEN $2='' THEN NULL ELSE now() END
+		WHERE id=$1`, id, decision, note, runID); err != nil {
+		return false, err
+	}
+	if severity != nil && *severity != "" {
+		if _, err = tx.ExecContext(ctx, `UPDATE findings SET severity=$2 WHERE id=$1`, id, *severity); err != nil {
+			return false, err
+		}
+		if nodeID != nil {
+			_, _ = tx.ExecContext(ctx, `UPDATE exploration_nodes
+				SET payload = jsonb_set(payload, '{severity}', to_jsonb($1::text)) WHERE id=$2`, *severity, *nodeID)
+		}
+	}
+	if applyStatus != nil && *applyStatus != "" {
+		if _, _, _, _, err = SetFindingStatusTx(ctx, tx, id, *applyStatus); err != nil {
+			return false, err
+		}
+	}
+	return found, tx.Commit()
 }
 
 // SetFindingReportByNodeID sets the Markdown report on the standalone finding row
