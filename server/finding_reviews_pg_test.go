@@ -147,6 +147,15 @@ func TestReviewHTTPThroughConversationAndTools(t *testing.T) {
 	if !strings.Contains(md, "人工复核结论") || !strings.Contains(md, "误报") {
 		t.Fatalf("export missing review section:\n%s", md)
 	}
+	// The export query scans a wider column list than GetFinding; assert the new
+	// review columns line up there too.
+	exported, err := s.m.pg.ListFindingsForExport(db.FindingFilter{}, []int64{fid})
+	if err != nil || len(exported) != 1 || exported[0].ReviewDecision != db.FindingReviewFalsePositive {
+		t.Fatalf("export rows: %+v err=%v", exported, err)
+	}
+	if csv := string(report.FindingsCSV(exported)); !strings.Contains(csv, "误报") {
+		t.Fatalf("csv missing review decision: %s", csv)
+	}
 }
 
 func TestReviewDecisionValidation(t *testing.T) {
