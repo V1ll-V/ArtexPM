@@ -1,21 +1,32 @@
 <div align="center">
 
-# ARTEX
+# ARTEX · ArtexPM
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
+**二次开发分支 · Secondary Development Fork**
 
-🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
-
-📦 **该仓库为ARTEX最后一个版本纯源码备份，docker部署源失效自行让AI本地构建即可**
+[本仓库](https://github.com/V1ll-V/ArtexPM) · [上游项目](https://github.com/Autumn-27/ARTEX)
 
 </div>
 
 ---
 
+## 关于本仓库（先读）
+
+- 本仓库是 [ARTEX](https://github.com/Autumn-27/ARTEX) 的**二次开发分支**，不是上游官方仓库；上游最后版本以源码备份形式提供，原有 Docker 镜像 / Release 链路已失效。
+- 本分支相对上游的主要改动：
+  1. 新增**人工复核（误报 / 夸大判定）**：人工审查后可发起带条件的复核，Agent 只给建议，最终由人确认；结论进入漏洞详情与导出报告。
+  2. Dockerfile 去掉 `# syntax=docker/dockerfile:1`，避免网络受限时 `docker build` 卡在 Docker Hub 前端镜像拉取；`TARGETARCH` 默认 `amd64`。
+  3. README 按本分支的构建/升级方式调整；人工复核说明见下文。
+- **不要使用上游的「页面一键更新 / 预编译 Releases / `docker compose pull`」**：它们会拉取上游官方二进制，覆盖本分支的改动。本分支请用下方「快速开始（本分支）」的本地构建流程。
+- 开源协议仍为 **AGPL-3.0**；二次开发、分发与网络提供服务时需遵守原协议。
+
+---
+
 ## 截图预览
 
-> 完整交互见[在线 Demo](https://artex-demo.vercel.app/)。
+> 界面示意（截自上游版本）；本分支新增的「人工复核」入口见下文说明。
 
 | 仪表盘（总览 / Token 消耗 / 活动流） | 任务列表 |
 | :---: | :---: |
@@ -64,11 +75,83 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ---
 
-## 安装
+## 快速开始（本分支）
+
+> 本分支推荐用**本地构建**：前端静态导出 → 编译内嵌单二进制 → 构建运行镜像。上游的预编译镜像/Releases 不包含本分支改动。
+
+### 前提
+
+- Docker + Docker Compose
+- Go 1.26+（仅构建二进制用；也可以在 `golang:1.26` 容器里编译）
+- Node.js 20+ 与 npm（构建前端）
+
+### 1. 配置
+
+```bash
+cp .env.example .env
+```
+
+`.env` 至少填 `POSTGRES_PASSWORD`；并把 `ARTEX_TAG` 改成 `local`，与下面构建的镜像 tag 保持一致：
+
+```dotenv
+ARTEX_TAG=local
+POSTGRES_PASSWORD=change-me
+```
+
+### 2. 构建前端与单二进制
+
+```bash
+# 前端静态导出
+cd web && npm ci && npm run build:static && cd ..
+
+# 拷进内嵌目录
+rm -rf server/webui/dist && cp -r web/out server/webui/dist
+
+# 编译 Linux 单二进制（-tags embedui 才会内嵌前端）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -tags embedui -o dist/amd64/artex ./cmd/artex
+```
+
+> Windows PowerShell 下 `npm run build:static` 的 `NEXT_EXPORT=1` 写法不生效，改用：
+> `$env:NEXT_EXPORT='1'; npx next build`。
+> 也可以在 Go 容器里编译，避免本机装 Go：
+> `docker run --rm -v "$PWD:/src" -w /src golang:1.26 sh -c 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embedui -o dist/amd64/artex ./cmd/artex'`
+
+### 3. 构建镜像并启动
+
+```bash
+docker build -t autumn27/artex:local .
+docker compose up -d
+# → http://localhost:8787（首次进入 /setup 设置管理员密码）
+```
+
+- 数据库迁移在 `artex` 启动时幂等执行；升级前建议备份 PostgreSQL 与 `./data`。
+- `docker build` 需要能访问 Debian / NodeSource / Playwright 的下载源。网络受限时，可以给构建传代理：
+  `docker build --build-arg HTTP_PROXY=http://host.docker.internal:7890 --build-arg HTTPS_PROXY=http://host.docker.internal:7890 -t autumn27/artex:local .`
+
+### 网络受限时的增量更新（只换程序）
+
+如果镜像已经存在，只是换了二进制，可以跳过 apt/npm 层，直接替换镜像里的 `/app/artex`：
+
+```bash
+docker create --name artex-new autumn27/artex:local
+docker cp dist/amd64/artex artex-new:/app/artex
+docker commit artex-new autumn27/artex:local
+docker rm artex-new
+docker compose up -d artex
+```
+
+> 这种方式只适合本地快速验证；可复现的正式构建仍建议用 `docker build`。
+
+---
+
+## 安装（上游方式，仅供参考）
+
+> 以下命令中的仓库地址、镜像、Releases 都指向**上游 ARTEX**。本分支请优先使用上面的「快速开始（本分支）」；除非你明确要切回上游，否则不要执行 `docker compose pull artex`。
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
 
-### 方式一：一键安装脚本（推荐）
+### 方式一：一键安装脚本（上游）
 
 ```bash
 git clone https://github.com/Autumn-27/ARTEX.git
@@ -109,7 +192,7 @@ cp config.example.json config.json   # 填好 database 连接
 ./start.sh                           # → http://localhost:8787
 ```
 
-> 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./artex`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**。直接运行 `./artex` 时更新完就不会被拉起了。
+> 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./artex`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**上游的页面一键更新靠它完成换装（本分支不推荐该功能，见下文）**。直接运行 `./artex` 时更新完就不会被拉起了。
 > 后台常驻：`nohup ./start.sh >artex.log 2>&1 &`。
 
 ### 方式四：从源码编译单二进制
@@ -142,11 +225,23 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ---
 
-## 更新升级
+## 更新升级（本分支）
+
+> ⚠️ **本分支不要使用页面「一键更新」**：它从上游 GitHub Release 下载官方二进制，会覆盖本分支的人工复核等改动，甚至造成新代码与数据库结构不匹配。
+>
+> 本分支升级流程：
+> ```bash
+> git pull                      # 或 rebase 到上游
+> # 重新执行「快速开始（本分支）」的 2、3 步
+> docker compose up -d artex
+> ```
+> 数据库迁移仍由新二进制启动时幂等执行；升级前请备份 PostgreSQL 与 `./data`。
+>
+> 下面保留上游的更新说明，仅作参考。
 
 > 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
 
-### 方式一：页面一键更新（推荐）
+### 方式一：页面一键更新（上游功能，本分支不推荐）
 
 在 **系统配置** 页（侧边栏「系统配置」→ `/system/settings`）的**版本与更新**卡片里，可以直接检查并安装新版本，无需登录服务器。
 
@@ -486,6 +581,8 @@ https://github.com/oritera/Cairn
 ### 开源协议
 
 本项目采用 **GNU Affero General Public License v3.0（AGPL-3.0）** 授权，完整条款见仓库根目录的 [LICENSE](LICENSE) 文件。
+
+本仓库是上游 ARTEX 的二次开发分支；原始代码版权归 Autumn-27 及贡献者所有，本分支的修改同样以 AGPL-3.0 发布。
 
 这意味着任何人都可以自由使用、修改和分发本项目，但**衍生作品必须同样以 AGPL-3.0 开源**；特别地，**若你修改本项目并通过网络（如部署为在线服务）向用户提供，也必须向这些用户公开对应的完整源码**。
 
