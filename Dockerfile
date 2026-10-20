@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 #
 # 运行镜像（不在镜像里编译）：只装常用工具，放入**预编译好的 Linux 单二进制**。
 # 二进制由 CI 的 binaries job 交叉编译（纯 Go、无 QEMU），按目标架构放在
@@ -9,9 +8,14 @@
 #   cd web && npm run build:static && cd ..
 #   cp -r web/out server/webui/dist
 #   CGO_ENABLED=0 GOARCH=amd64 go build -tags embedui -o dist/amd64/artex ./cmd/artex
-#   docker build -t artex:local .
+#   docker build -t autumn27/artex:local .
+#
+# 注意：这里刻意不写 `# syntax=docker/dockerfile:1`。该指令会让 BuildKit 去
+# Docker Hub 拉取 dockerfile 前端镜像；在无法访问 auth.docker.io 的网络里，
+# 连 `docker build` 都会失败。本文件只用到 BuildKit 内置能力，删除该指令后
+# 构建可直接使用内置前端。
 FROM python:3.12-slim-bookworm
-ARG TARGETARCH
+ARG TARGETARCH=amd64
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
 # Node 从 NodeSource 装 20.x：bookworm 自带的 apt nodejs 是 18，Playwright 要求 >=20。
 RUN apt-get update && apt-get install -y --no-install-recommends \
