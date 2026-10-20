@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ARTEX 安装脚本：① 全部 Docker  ② 本地编译运行
+# ARTEX 安装脚本：① 全部 Docker（本地构建镜像）  ② 本地编译运行
 set -euo pipefail
 cd "$(cd "$(dirname "$0")" && pwd)"
 
@@ -31,6 +31,27 @@ ensure_docker(){
 }
 
 # ── ① 全部 Docker ───────────────────────────────
+# 本分支默认本地构建镜像，避免 docker compose pull 拉到不含本分支改动的上游镜像。
+host_arch(){
+  case "$(uname -m)" in
+    x86_64|amd64) echo amd64 ;;
+    arm64|aarch64) echo arm64 ;;
+    *) echo amd64 ;;
+  esac
+}
+
+# 构建镜像所需的 Linux 单二进制 dist/<arch>/artex；缺 go/npm 时返回 1。
+build_linux_binary(){
+  local arch="$1"
+  command -v go >/dev/null 2>&1 || return 1
+  command -v npm >/dev/null 2>&1 || return 1
+  info "未找到 dist/${arch}/artex，尝试从源码构建（可能需要几分钟）…"
+  ( cd web && npm ci && npm run build:static )
+  rm -rf server/webui/dist && cp -r web/out server/webui/dist
+  CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
+    go build -tags embedui -trimpath -o "dist/${arch}/artex" ./cmd/artex
+}
+
 install_docker(){
   ensure_docker
   if [ ! -f .env ]; then
@@ -45,8 +66,34 @@ install_docker(){
   else
     info "沿用已存在的 .env"
   fi
-  info "拉取镜像并启动…"
-  docker compose pull || true
+
+  local arch tag="local"
+  arch="${TARGETARCH:-$(host_arch)}"
+  if grep -q '^ARTEX_TAG=' .env; then
+    sed -i.bak "s|^ARTEX_TAG=.*|ARTEX_TAG=${tag}|" .env && rm -f .env.bak
+  else
+    printf '\nARTEX_TAG=%s\n' "$tag" >> .env
+  fi
+  ok "ARTEX_TAG=${tag}（使用本地构建的镜像）"
+
+  if [ ! -f "dist/${arch}/artex" ]; then
+    build_linux_binary "$arch" || true
+  fi
+  if [ -f "dist/${arch}/artex" ]; then
+    info "本地构建镜像 autumn27/artex:${tag} …"
+    docker build --build-arg TARGETARCH="${arch}" -t "autumn27/artex:${tag}" .
+  else
+    warn "未找到 dist/${arch}/artex，无法本地构建镜像。"
+    info "请先按 README「快速开始（本分支）」准备二进制，例如："
+    info "  CGO_ENABLED=0 GOOS=linux GOARCH=${arch} go build -tags embedui -o dist/${arch}/artex ./cmd/artex"
+    if [ "$(ask '仍要拉取上游镜像（不包含本分支改动）? (y/n)' n)" = y ]; then
+      docker compose pull artex || true
+    else
+      die "已取消：请先构建 dist/${arch}/artex，或在有网环境执行 docker build。"
+    fi
+  fi
+
+  info "启动…"
   docker compose up -d
   ok "启动完成 → http://localhost:8787"
   info "查看日志：docker compose logs -f artex"
@@ -112,7 +159,7 @@ JSON
 
 echo "=============================="
 echo "  ARTEX 安装"
-echo "  1) 全部 Docker 安装"
+echo "  1) 全部 Docker 安装（本地构建镜像）"
 echo "  2) 本地运行（go 编译）"
 echo "=============================="
 case "$(ask '选择' 1)" in
