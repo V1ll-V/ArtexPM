@@ -19,6 +19,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
   1. 新增**人工复核（误报 / 夸大判定）**：人工审查后可发起带条件的复核，Agent 只给建议，最终由人确认；结论进入漏洞详情与导出报告。
   2. Dockerfile 去掉 `# syntax=docker/dockerfile:1`，避免网络受限时 `docker build` 卡在 Docker Hub 前端镜像拉取；`TARGETARCH` 默认 `amd64`。
   3. README 按本分支的构建/升级方式调整；人工复核说明见下文。
+  4. `install.sh` / `update.sh` 的 Docker 模式改为**本地构建镜像**；只有显式把 tag 改成非 `local` 时才会拉取上游镜像（且会二次确认）。
 - **不要使用上游的「页面一键更新 / 预编译 Releases / `docker compose pull`」**：它们会拉取上游官方二进制，覆盖本分支的改动。本分支请用下方「快速开始（本分支）」的本地构建流程。
 - 开源协议仍为 **AGPL-3.0**；二次开发、分发与网络提供服务时需遵守原协议。
 
@@ -145,28 +146,30 @@ docker compose up -d artex
 
 ---
 
-## 安装（上游方式，仅供参考）
+## 其他安装方式（含上游参考）
 
-> 以下命令中的仓库地址、镜像、Releases 都指向**上游 ARTEX**。本分支请优先使用上面的「快速开始（本分支）」；除非你明确要切回上游，否则不要执行 `docker compose pull artex`。
+> 以下保留 ARTEX 的安装/升级方式作参考。注意：`./install.sh` / `./update.sh` 的 Docker 模式已在本分支改为**本地构建镜像**；`docker compose pull`、Releases 等仍指向上游。本分支请优先使用上面的「快速开始（本分支）」。
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
 
-### 方式一：一键安装脚本（上游）
+### 方式一：一键安装脚本（本分支 Docker 模式已适配）
 
 ```bash
-git clone https://github.com/Autumn-27/ARTEX.git
-cd ARTEX
+git clone https://github.com/V1ll-V/ArtexPM.git
+cd ArtexPM
 ./install.sh
 ```
 
+> Docker 模式会先把 `.env` 的 `ARTEX_TAG` 设为 `local`，再本地 `docker build`；找不到 `dist/<arch>/artex` 时会尝试从源码构建，或提示你先构建二进制，不会静默拉取上游镜像。
+
 脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
 
-- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → `docker compose up -d`。
+- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → 本地构建镜像 → `docker compose up -d`。
 - **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
 
 装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
 
-### 方式二：Docker Compose（手动）
+### 方式二：Docker Compose（手动，拉取上游镜像）
 
 ```bash
 git clone https://github.com/Autumn-27/ARTEX.git
@@ -237,6 +240,8 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 > ```
 > 数据库迁移仍由新二进制启动时幂等执行；升级前请备份 PostgreSQL 与 `./data`。
 >
+> 也可以运行 `./update.sh` 选择「Docker 更新」：本分支会本地重建镜像（`ARTEX_TAG=local`），不会拉取上游。
+>
 > 下面保留上游的更新说明，仅作参考。
 
 > 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
@@ -251,22 +256,22 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 - **随时可回退**：上一版本保留为 `artex.old`，卡片上有「回滚到上一版本」。注意数据库结构不会回退。
 - **更新会中断正在运行的任务**——更新即重启，请在空闲时进行。
 - **开发构建不给更新**：版本号是 `dev` 或 `git describe` 带后缀时禁用，避免正式版覆盖掉本地调试的二进制。
-- **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级仍请用 `docker compose pull artex && docker compose up -d artex`。
+- **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。本分支要连镜像一起升级，请用本地 `docker build -t autumn27/artex:local .`，不要用 `docker compose pull`（会拉上游镜像）。
 - 访问 GitHub 需要代理时，在同一页面配置**全局代理**即可，更新链路会走它。更新只从 GitHub 域名下载并强制 HTTPS。
 
-### 方式二：一键更新脚本
+### 方式二：一键更新脚本（本分支 Docker 模式已适配）
 
 ```bash
-cd ARTEX
+cd ArtexPM
 ./update.sh
 ```
 
 脚本先可选 `git pull` 拉取最新代码，再让你选 **① Docker 更新** 或 **② 本地编译更新**（与 `install.sh` 对应）：
 
-- **① Docker**：可指定目标镜像 tag（回车沿用 `.env` 的 `ARTEX_TAG`，缺省 `latest`）→ `docker compose pull` → `docker compose up -d`（换新镜像重启即自动迁移）。
+- **① Docker**：默认 `ARTEX_TAG=local` → `docker build` 本地重建 → `docker compose up -d`（重启即自动迁移）。只有把 tag 改成非 `local` 时才会 `docker compose pull`，并会二次确认。
 - **② 本地**：重建前端静态产物 → 重新编译 `./artex`（完成后重启进程生效）。
 
-### 方式三：Docker Compose（手动）
+### 方式三：Docker Compose（手动，拉取上游镜像）
 
 ```bash
 cd ARTEX
