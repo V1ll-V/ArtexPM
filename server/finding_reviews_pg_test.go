@@ -78,7 +78,7 @@ func TestReviewHTTPThroughConversationAndTools(t *testing.T) {
 				t.Error("agent did not receive source evidence")
 			}
 			name = "record_finding_review_result"
-			input = `{"verdict":"false_positive","confidence":"high","summary":"原证据把静态 200 回显误判为注入成功","evidence":"原证据中的响应是固定 HTML，无参数回显；请求实际未改变服务端状态。","recommended_status":"false_positive","revised_report":"## 修订后报告\n\n- 原报告把静态 200 回显误判为注入；实际无参数回显，不存在注入。\n- 严重等级：高 → 低\n- 建议：按信息泄露/无实际影响处理。"}`
+			input = `{"verdict":"false_positive","confidence":"high","summary":"原证据把静态 200 回显误判为注入成功","evidence":"原证据中的响应是固定 HTML，无参数回显；请求实际未改变服务端状态。","recommended_status":"false_positive","revised_report":"## 修订后报告\n\n### 漏洞概述\n搜索接口未发现可注入参数。\n\n### 影响与危害\n严重等级：高 → 低；仅存在静态 HTML 回显，无实际影响。\n\n### 复现步骤 / PoC\nGET /search?q=test，响应为固定 HTML，无参数回显。\n\n### 证据\n原流量 #12 的响应体与静态页面一致。\n\n### 修复建议\n无需修复，建议关闭该误报。"}`
 		}
 		if n > 2 {
 			return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("复核结论已保存")}}, "end_turn", llm.Usage{}, nil
@@ -120,7 +120,7 @@ func TestReviewHTTPThroughConversationAndTools(t *testing.T) {
 	if run.Feedback != "返回 200 但无回显，怀疑误报" {
 		t.Fatalf("feedback = %q", run.Feedback)
 	}
-	if !strings.Contains(run.RevisedReport, "修订后报告") || !strings.Contains(run.RevisedReport, "高 → 低") {
+	if !strings.Contains(run.RevisedReport, "修订后报告") || !strings.Contains(run.RevisedReport, "高 → 低") || !strings.Contains(run.RevisedReport, "复现步骤") {
 		t.Fatalf("revised report not saved: %q", run.RevisedReport)
 	}
 	// The revised report is a proposal only; the finding's own report is untouched.

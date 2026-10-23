@@ -332,7 +332,7 @@ func (s *Server) findingReviewTools() []actool.CoreTool {
 					"previous_runs":        previous,
 				})
 			}),
-		wrTool("record_finding_review_result", "为当前复核会话保存唯一结论；结论只是建议，系统不会自动修改漏洞状态/严重等级/报告。必须提供本次实际核对的内容与证据，无法确认时写明阻塞原因。若原报告存在夸大或事实偏差、需要更正，可同时给出精简的修订后报告（revised_report），供人工在复核记录中查看；不需要修改时留空。",
+		wrTool("record_finding_review_result", "为当前复核会话保存唯一结论；结论只是建议，系统不会自动修改漏洞状态/严重等级/报告。必须提供本次实际核对的内容与证据，无法确认时写明阻塞原因。若原报告存在夸大或事实偏差、需要更正，可同时给出完整的修订后漏洞报告（revised_report），供人工在复核记录中查看；不需要修改时留空。",
 			objSchema(map[string]any{
 				"verdict": map[string]any{"type": "string", "enum": []string{"confirmed", "false_positive", "exaggerated", "inconclusive"}},
 				"confidence": map[string]any{"type": "string", "enum": []string{"low", "medium", "high"},
@@ -343,7 +343,7 @@ func (s *Server) findingReviewTools() []actool.CoreTool {
 					"description": "结论为 exaggerated 时的建议严重等级（可选）"},
 				"recommended_status": map[string]any{"type": "string", "enum": []string{"confirmed", "false_positive", ""},
 					"description": "建议的处置状态（可选，仅供人工参考）"},
-				"revised_report": strParam("可选：原报告需要更正（夸大/偏差）时，给出精简的修订后报告 Markdown，只保留必要信息（概述、修订后影响/等级、关键证据、修复建议），不要重复原文；无需修改时留空"),
+				"revised_report": strParam("可选：原报告需要更正（夸大/偏差）时，给出完整的修订后漏洞报告 Markdown，要求与正常漏洞报告一致：概述、影响与危害（含修订后严重等级及与原报告的差异）、复现步骤/PoC、证据、修复建议；无需修改时留空"),
 			}, "verdict", "summary", "evidence"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 				var a struct {
 					Verdict             string `json:"verdict"`
@@ -463,6 +463,62 @@ func (s *Server) migrateFindingReviewV2() error {
 	return tx.Commit()
 }
 
+// reviewerFullReportNote supersedes the earlier "concise" note. It is appended
+// once for installs that already ran v2, after the old note is stripped.
+const reviewerFullReportNote = `
+
+补充（修订后报告）：如果复核发现原详细报告存在夸大或事实偏差、需要更正，在调用 record_finding_review_result 时同时填写 revised_report：一份完整的修订后漏洞报告，要求与正常漏洞报告一致，必须包含「漏洞概述 / 影响与危害（含修订后严重等级及与原报告的差异）/ 复现步骤与 PoC（实际命令、请求、payload、关键响应）/ 证据（流量 ID、命令输出或响应片段）/ 修复建议」。可以基于原报告改写，但必须修正不成立或夸大的部分，不要编造未核实内容，也不要删掉仍然成立的 PoC 细节。原报告正确或结论为无法确认时留空；它只是给人工查看的完整修订版建议，不会覆盖原报告。`
+
+// migrateFindingReviewV3 corrects the v2 "concise" guidance on installs that
+// already ran it: strip the old appended note, then append the full-report note
+// unless the template already carries the new requirement.
+func (s *Server) migrateFindingReviewV3() error {
+	const flag = "finding_reviewer_v3"
+	tx, err := s.m.pg.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`SELECT pg_advisory_xact_lock(7337741013)`); err != nil {
+		return err
+	}
+	var done string
+	err = tx.QueryRow(`SELECT value FROM settings WHERE key=$1`, flag).Scan(&done)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if done == "true" {
+		return nil
+	}
+	for _, t := range s.findingReviewTools() {
+		schema, _ := json.Marshal(t.InputSchema())
+		if _, err := tx.Exec(`UPDATE tools SET description=$2, schema=$3 WHERE key=$1`, t.Name(), t.Description(), schema); err != nil {
+			return err
+		}
+	}
+	var promptID sql.NullInt64
+	err = tx.QueryRow(`SELECT current_prompt_id FROM agents WHERE key=$1`, db.FindingReviewAgentKey).Scan(&promptID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if promptID.Valid {
+		if _, err := tx.Exec(`UPDATE agent_prompts
+			SET template_text = regexp_replace(template_text, E'\n\n补充（修订后报告）：.*$', '', 's')
+			WHERE id=$1`, promptID.Int64); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE agent_prompts
+			SET template_text = template_text || $2
+			WHERE id=$1 AND position('完整的修订后漏洞报告' in template_text)=0`, promptID.Int64, reviewerFullReportNote); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO settings(key,value) VALUES($1,'true') ON CONFLICT(key) DO UPDATE SET value='true'`, flag); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // Seed the editable agent atomically, without an automatic discovery trigger.
 // Once seeded, user edits/deletion survive restarts; a pre-existing key is kept.
 func (s *Server) seedFindingReviewer() error {
@@ -474,6 +530,9 @@ func (s *Server) seedFindingReviewer() error {
 		}
 	}
 	if err := s.migrateFindingReviewV2(); err != nil {
+		return err
+	}
+	if err := s.migrateFindingReviewV3(); err != nil {
 		return err
 	}
 	const flag = "finding_reviewer_seed_v1"
