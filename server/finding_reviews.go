@@ -332,7 +332,7 @@ func (s *Server) findingReviewTools() []actool.CoreTool {
 					"previous_runs":        previous,
 				})
 			}),
-		wrTool("record_finding_review_result", "为当前复核会话保存唯一结论；结论只是建议，系统不会自动修改漏洞状态/严重等级/报告。必须提供本次实际核对的内容与证据，无法确认时写明阻塞原因。",
+		wrTool("record_finding_review_result", "为当前复核会话保存唯一结论；结论只是建议，系统不会自动修改漏洞状态/严重等级/报告。必须提供本次实际核对的内容与证据，无法确认时写明阻塞原因。若原报告存在夸大或事实偏差、需要更正，可同时给出精简的修订后报告（revised_report），供人工在复核记录中查看；不需要修改时留空。",
 			objSchema(map[string]any{
 				"verdict": map[string]any{"type": "string", "enum": []string{"confirmed", "false_positive", "exaggerated", "inconclusive"}},
 				"confidence": map[string]any{"type": "string", "enum": []string{"low", "medium", "high"},
@@ -343,6 +343,7 @@ func (s *Server) findingReviewTools() []actool.CoreTool {
 					"description": "结论为 exaggerated 时的建议严重等级（可选）"},
 				"recommended_status": map[string]any{"type": "string", "enum": []string{"confirmed", "false_positive", ""},
 					"description": "建议的处置状态（可选，仅供人工参考）"},
+				"revised_report": strParam("可选：原报告需要更正（夸大/偏差）时，给出精简的修订后报告 Markdown，只保留必要信息（概述、修订后影响/等级、关键证据、修复建议），不要重复原文；无需修改时留空"),
 			}, "verdict", "summary", "evidence"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 				var a struct {
 					Verdict             string `json:"verdict"`
@@ -351,15 +352,16 @@ func (s *Server) findingReviewTools() []actool.CoreTool {
 					Evidence            string `json:"evidence"`
 					RecommendedSeverity string `json:"recommended_severity"`
 					RecommendedStatus   string `json:"recommended_status"`
+					RevisedReport       string `json:"revised_report"`
 				}
 				if err := json.Unmarshal(in, &a); err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
 				if err := s.m.pg.RecordFindingReviewResult(ctx, intercept.ConvIDFromContext(ctx),
-					a.Verdict, a.Confidence, a.Summary, a.Evidence, a.RecommendedSeverity, a.RecommendedStatus); err != nil {
+					a.Verdict, a.Confidence, a.Summary, a.Evidence, a.RecommendedSeverity, a.RecommendedStatus, a.RevisedReport); err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
-				return jsonResult(map[string]any{"saved": true, "verdict": a.Verdict})
+				return jsonResult(map[string]any{"saved": true, "verdict": a.Verdict, "has_revised_report": a.RevisedReport != ""})
 			}),
 	}
 }
@@ -410,6 +412,57 @@ func (s *Server) reviewWorkerTrace(f *db.DBFinding, limit int) map[string]any {
 	return map[string]any{"intent_id": intentID, "steps": steps}
 }
 
+// reviewerRevisedReportNote is appended once to an existing reviewer prompt so
+// installs seeded before revised_report existed learn the new output field
+// without replacing the user's edited template.
+const reviewerRevisedReportNote = `
+
+补充（修订后报告）：如果复核发现原详细报告存在夸大或事实偏差、需要更正，在调用 record_finding_review_result 时同时填写 revised_report：一份精简的修订后报告，建议包含「漏洞概述 / 修订后的影响与严重等级 / 关键证据或复现要点 / 修复建议」，明确与原报告的差异，不要重复原文、不要编造未核实内容。原报告正确或结论为无法确认时留空。它只是给人工查看的建议，不会覆盖原报告。`
+
+// migrateFindingReviewV2 upgrades installs seeded before revised_report existed.
+// SeedTool is first-insert-only, so the tool schema and the appended prompt note
+// must be refreshed explicitly; the settings flag keeps this one-time.
+func (s *Server) migrateFindingReviewV2() error {
+	const flag = "finding_reviewer_v2"
+	tx, err := s.m.pg.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`SELECT pg_advisory_xact_lock(7337741012)`); err != nil {
+		return err
+	}
+	var done string
+	err = tx.QueryRow(`SELECT value FROM settings WHERE key=$1`, flag).Scan(&done)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if done == "true" {
+		return nil
+	}
+	for _, t := range s.findingReviewTools() {
+		schema, _ := json.Marshal(t.InputSchema())
+		if _, err := tx.Exec(`UPDATE tools SET description=$2, schema=$3 WHERE key=$1`, t.Name(), t.Description(), schema); err != nil {
+			return err
+		}
+	}
+	var promptID sql.NullInt64
+	err = tx.QueryRow(`SELECT current_prompt_id FROM agents WHERE key=$1`, db.FindingReviewAgentKey).Scan(&promptID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if promptID.Valid {
+		if _, err := tx.Exec(`UPDATE agent_prompts SET template_text = template_text || $2
+			WHERE id=$1 AND position('revised_report' in template_text)=0`, promptID.Int64, reviewerRevisedReportNote); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO settings(key,value) VALUES($1,'true') ON CONFLICT(key) DO UPDATE SET value='true'`, flag); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // Seed the editable agent atomically, without an automatic discovery trigger.
 // Once seeded, user edits/deletion survive restarts; a pre-existing key is kept.
 func (s *Server) seedFindingReviewer() error {
@@ -419,6 +472,9 @@ func (s *Server) seedFindingReviewer() error {
 		if err := s.m.pg.SeedTool(t.Name(), t.Description(), schema, bindings); err != nil {
 			return err
 		}
+	}
+	if err := s.migrateFindingReviewV2(); err != nil {
+		return err
 	}
 	const flag = "finding_reviewer_seed_v1"
 	tx, err := s.m.pg.Begin()

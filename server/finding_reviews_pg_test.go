@@ -78,7 +78,7 @@ func TestReviewHTTPThroughConversationAndTools(t *testing.T) {
 				t.Error("agent did not receive source evidence")
 			}
 			name = "record_finding_review_result"
-			input = `{"verdict":"false_positive","confidence":"high","summary":"原证据把静态 200 回显误判为注入成功","evidence":"原证据中的响应是固定 HTML，无参数回显；请求实际未改变服务端状态。","recommended_status":"false_positive"}`
+			input = `{"verdict":"false_positive","confidence":"high","summary":"原证据把静态 200 回显误判为注入成功","evidence":"原证据中的响应是固定 HTML，无参数回显；请求实际未改变服务端状态。","recommended_status":"false_positive","revised_report":"## 修订后报告\n\n- 原报告把静态 200 回显误判为注入；实际无参数回显，不存在注入。\n- 严重等级：高 → 低\n- 建议：按信息泄露/无实际影响处理。"}`
 		}
 		if n > 2 {
 			return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("复核结论已保存")}}, "end_turn", llm.Usage{}, nil
@@ -119,6 +119,13 @@ func TestReviewHTTPThroughConversationAndTools(t *testing.T) {
 	}
 	if run.Feedback != "返回 200 但无回显，怀疑误报" {
 		t.Fatalf("feedback = %q", run.Feedback)
+	}
+	if !strings.Contains(run.RevisedReport, "修订后报告") || !strings.Contains(run.RevisedReport, "高 → 低") {
+		t.Fatalf("revised report not saved: %q", run.RevisedReport)
+	}
+	// The revised report is a proposal only; the finding's own report is untouched.
+	if f, _ := s.m.pg.GetFinding(fid); f != nil && strings.Contains(f.Report, "修订后报告") {
+		t.Fatalf("revised report must not overwrite findings.report: %q", f.Report)
 	}
 
 	// The agent's verdict is a recommendation only: no status/decision change yet.

@@ -1136,6 +1136,8 @@ CREATE TABLE IF NOT EXISTS finding_retests (
     confidence TEXT NOT NULL DEFAULT '',
     recommended_severity TEXT NOT NULL DEFAULT '',
     recommended_status TEXT NOT NULL DEFAULT '',
+    -- 复核给出的精简修订报告；只在原报告需要更正时非空，仅作建议，不覆盖 findings.report。
+    revised_report TEXT NOT NULL DEFAULT '',
     snapshot JSONB NOT NULL,
     summary TEXT NOT NULL DEFAULT '',
     evidence TEXT NOT NULL DEFAULT '',
@@ -1150,6 +1152,7 @@ ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS scope JSONB NOT NULL DEFAUL
 ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS confidence TEXT NOT NULL DEFAULT '';
 ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS recommended_severity TEXT NOT NULL DEFAULT '';
 ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS recommended_status TEXT NOT NULL DEFAULT '';
+ALTER TABLE finding_retests ADD COLUMN IF NOT EXISTS revised_report TEXT NOT NULL DEFAULT '';
 
 -- 旧库的 verdict CHECK 是内联匿名约束，先删掉所有非本版本的 verdict 约束，再按需安装
 -- 具名约束，避免每次启动都全表校验。

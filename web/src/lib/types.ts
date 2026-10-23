@@ -753,6 +753,7 @@ export interface FindingRetest {
   confidence: FindingReviewConfidence;
   recommended_severity: "" | Severity;
   recommended_status: "" | "confirmed" | "false_positive";
+  revised_report: string;
   summary: string;
   evidence: string;
   error: string;

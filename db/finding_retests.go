@@ -59,17 +59,21 @@ type FindingRetest struct {
 	Confidence          string          `json:"confidence"`
 	RecommendedSeverity string          `json:"recommended_severity"`
 	RecommendedStatus   string          `json:"recommended_status"`
-	Snapshot            json.RawMessage `json:"snapshot,omitempty"`
-	Summary             string          `json:"summary"`
-	Evidence            string          `json:"evidence"`
-	Error               string          `json:"error"`
-	CreatedAt           time.Time       `json:"created_at"`
-	StartedAt           *time.Time      `json:"started_at"`
-	FinishedAt          *time.Time      `json:"finished_at"`
+	// RevisedReport is the reviewer's concise corrected report, produced only when
+	// the original report needs correction (exaggerated impact / factual drift).
+	// It is a proposal shown to the human; findings.report is not touched.
+	RevisedReport string          `json:"revised_report"`
+	Snapshot      json.RawMessage `json:"snapshot,omitempty"`
+	Summary       string          `json:"summary"`
+	Evidence      string          `json:"evidence"`
+	Error         string          `json:"error"`
+	CreatedAt     time.Time       `json:"created_at"`
+	StartedAt     *time.Time      `json:"started_at"`
+	FinishedAt    *time.Time      `json:"finished_at"`
 }
 
 const retestCols = `id, finding_id, conversation_id, kind, status, verdict, notes, feedback, scope,
-	confidence, recommended_severity, recommended_status, summary, evidence, error,
+	confidence, recommended_severity, recommended_status, revised_report, summary, evidence, error,
 	created_at, started_at, finished_at`
 
 // ActiveFindingRetest is the small status payload polled by the findings list.
@@ -104,7 +108,7 @@ func scanRetest(row interface{ Scan(...any) error }) (*FindingRetest, error) {
 	r := &FindingRetest{}
 	var scope []byte
 	err := row.Scan(&r.ID, &r.FindingID, &r.ConversationID, &r.Kind, &r.Status, &r.Verdict, &r.Notes,
-		&r.Feedback, &scope, &r.Confidence, &r.RecommendedSeverity, &r.RecommendedStatus,
+		&r.Feedback, &scope, &r.Confidence, &r.RecommendedSeverity, &r.RecommendedStatus, &r.RevisedReport,
 		&r.Summary, &r.Evidence, &r.Error, &r.CreatedAt, &r.StartedAt, &r.FinishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -283,8 +287,10 @@ func (d *DB) RecordFindingRetestResult(ctx context.Context, conversationID int64
 }
 
 // RecordFindingReviewResult saves the agent's recommendation for a triage run.
-// It never touches findings: the human decides whether to adopt it.
-func (d *DB) RecordFindingReviewResult(ctx context.Context, conversationID int64, verdict, confidence, summary, evidence, recommendedSeverity, recommendedStatus string) error {
+// It never touches findings: the human decides whether to adopt it. revisedReport
+// is an optional concise corrected report, produced only when the original report
+// needs correction; it is stored on the run for review, not written to findings.
+func (d *DB) RecordFindingReviewResult(ctx context.Context, conversationID int64, verdict, confidence, summary, evidence, recommendedSeverity, recommendedStatus, revisedReport string) error {
 	if !ValidFindingReviewVerdict(verdict) {
 		return errors.New("verdict 必须为 confirmed / false_positive / exaggerated / inconclusive")
 	}
@@ -298,18 +304,22 @@ func (d *DB) RecordFindingReviewResult(ctx context.Context, conversationID int64
 		return errors.New("recommended_status 只能为 confirmed / false_positive（可空）")
 	}
 	summary, evidence = strings.TrimSpace(summary), strings.TrimSpace(evidence)
+	revisedReport = strings.TrimSpace(revisedReport)
 	if summary == "" || evidence == "" {
 		return errors.New("summary 与 evidence 不能为空；无法确认时说明实际检查及阻塞原因")
 	}
 	if len(summary) > 16000 || len(evidence) > 128000 {
 		return errors.New("复核结论过长（summary ≤ 16KB，evidence ≤ 128KB）")
 	}
+	if len(revisedReport) > 64000 {
+		return errors.New("修订后报告过长（≤ 64KB）")
+	}
 	res, err := d.ExecContext(ctx, `UPDATE finding_retests
 		SET verdict=$2, confidence=$3, summary=$4, evidence=$5,
-		    recommended_severity=$6, recommended_status=$7
+		    recommended_severity=$6, recommended_status=$7, revised_report=$8
 		WHERE conversation_id=$1 AND kind='triage' AND status='running'
 		  AND (verdict='' OR (verdict=$2 AND summary=$4 AND evidence=$5))`,
-		conversationID, verdict, confidence, summary, evidence, recommendedSeverity, recommendedStatus)
+		conversationID, verdict, confidence, summary, evidence, recommendedSeverity, recommendedStatus, revisedReport)
 	if err != nil {
 		return err
 	}

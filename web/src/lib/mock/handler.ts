@@ -1962,6 +1962,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         confidence: "",
         recommended_severity: "",
         recommended_status: "",
+        revised_report: "",
         summary: "",
         evidence: "",
         error: "",

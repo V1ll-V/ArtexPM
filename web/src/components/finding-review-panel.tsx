@@ -349,6 +349,17 @@ export function FindingReviewPanel({
                     </div>
                   </details>
                 ) : null}
+                {item.status === "completed" && item.revised_report ? (
+                  <details className="min-w-0">
+                    <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
+                      修订后报告
+                      <span className="text-muted-foreground text-xs">复核建议的精简版本，未覆盖原报告</span>
+                    </summary>
+                    <div className="mt-3 overflow-x-auto rounded-md border bg-muted/30 p-3">
+                      <Markdown text={item.revised_report} />
+                    </div>
+                  </details>
+                ) : null}
               </div>
             ))
           : null}
