@@ -150,3 +150,21 @@ func (s *Server) setLifecycleEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, s.lifecycleStatus(r.Context()))
 }
+
+// taskExecutionBlockReason explains the global admission gate without changing
+// the ability to save a task before the instance is enabled.
+func (s *Server) taskExecutionBlockReason() string {
+	if s.engine == nil || s.engine.lifecycleReady == nil || s.engine.lifecycleReady() {
+		return ""
+	}
+	status := s.lifecycleStatus(s.ctx)
+	if !status.Enabled {
+		return "任务已保存但尚未启动：候选验收联动流程未启用，请前往「系统 → 候选验收」完成检查并启用。"
+	}
+	for _, c := range status.Checks {
+		if !c.Ready {
+			return "任务尚不能启动：" + c.Reason + "；请前往「系统 → 候选验收」处理。"
+		}
+	}
+	return "任务尚不能启动，请前往「系统 → 候选验收」重新检查。"
+}

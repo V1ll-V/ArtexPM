@@ -109,7 +109,7 @@ func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
 
 func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
 	if mode != "bootstrap" && s.engine.lifecycleReady != nil && !s.engine.lifecycleReady() {
-		return false, fmt.Errorf("验收生命周期尚未启用或配置未就绪；检查 /api/verification/readiness")
+		return false, fmt.Errorf("%s", s.taskExecutionBlockReason())
 	}
 	if t == nil {
 		return false, fmt.Errorf("task not found")

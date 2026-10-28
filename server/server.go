@@ -1565,7 +1565,9 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
-	writeJSON(w, 201, taskDTO(t, s.resolvedTaskStatus(t)))
+	dto := taskDTO(t, s.resolvedTaskStatus(t))
+	dto.ExecutionBlockedReason = s.taskExecutionBlockReason()
+	writeJSON(w, 201, dto)
 }
 
 func (s *Server) validateTaskProfileIDs(ids []int64) error {

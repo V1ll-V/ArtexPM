@@ -3142,7 +3142,7 @@ function CreateTaskSheet({
     try {
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
-      await api.createTask({
+      const createdTask = await api.createTask({
         name: name.trim(),
         categoryId: categoryID,
         description: description.trim(),
@@ -3158,7 +3158,8 @@ function CreateTaskSheet({
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
       });
-      toast.success("任务已创建");
+      if (createdTask.execution_blocked_reason) toast.warning(createdTask.execution_blocked_reason, { duration: 12000 });
+      else toast.success("任务已创建");
       setName("");
       setCategoryID(undefined);
       setDescription("");
