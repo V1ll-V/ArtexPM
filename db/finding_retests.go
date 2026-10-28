@@ -153,6 +153,12 @@ func (d *DB) createFindingRun(ctx context.Context, findingID int64, kind, notes,
 	}
 	defer func() { _ = tx.Rollback() }()
 	var title string
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return nil, nil, false, err
+	}
+	if err = LockFindingEvidenceTx(tx, findingID, nil); err != nil {
+		return nil, nil, false, err
+	}
 	var snapshot []byte
 	err = tx.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(f.name,''), NULLIF(f.vulnclass,''), '未分类'),
 	jsonb_build_object('finding', to_jsonb(f),
@@ -346,7 +352,19 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Lock the finding before the retest, matching creation and cascading deletion.
+	// Use the shared task -> finding -> retest order before status/event writes.
+	if _, err = tx.Exec(`SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return err
+	}
+	var owner int64
+	if err = tx.QueryRow(`SELECT finding_id FROM finding_retests WHERE id=$1`, id).Scan(&owner); errors.Is(err, sql.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err = LockFindingEvidenceTx(tx, owner, nil); err != nil {
+		return err
+	}
 	var findingID int64
 	err = tx.QueryRow(`SELECT f.id FROM findings f WHERE f.id=(SELECT finding_id FROM finding_retests WHERE id=$1) FOR UPDATE OF f`, id).Scan(&findingID)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -558,6 +558,9 @@ func (d *DB) DeleteTaskCascadePrepared(
 		return result, err
 	}
 	defer tx.Rollback()
+	if _, err = tx.Exec(`SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return result, err
+	}
 	var expID int64
 	if err := tx.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1 FOR UPDATE`, id).Scan(&expID); err != nil {
 		if err == sql.ErrNoRows {
@@ -627,6 +630,9 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 			return result, err
 		}
 		result.AssetsDetached, _ = res.RowsAffected()
+	}
+	if err = retireTaskLifecycleTx(tx, id, deleteFindings); err != nil {
+		return result, err
 	}
 	if deleteFindings {
 		res, err := tx.Exec(`DELETE FROM findings WHERE task_id = $1`, id)

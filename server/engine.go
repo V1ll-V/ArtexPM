@@ -91,8 +91,9 @@ func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
 // (re)installed at runtime (LLM configured from the UI); the loops always run
 // but idle until an LLM is set.
 type Engine struct {
-	m        *Manager
-	debounce time.Duration
+	lifecycleReady func() bool // production V0/V1 joint switch; nil for isolated engines
+	m              *Manager
+	debounce       time.Duration
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
@@ -143,6 +144,16 @@ type Engine struct {
 	inflight     sync.Map // taskID -> *int64, 在跑的 planner.Plan + worker.Execute 计数(用于 drain)
 	coordStarted sync.Map // taskID -> bool, deadline 协调器是否已启动(Run/reload 去重)
 
+	// V0 收尾时序:closing 是非终态,与 settling 配合使用。
+	//   closingReason  taskID -> string,收尾原因(决定意图终态)
+	//   closingStarted taskID -> bool,收尾协调器去重
+	//   runEpoch       taskID -> int64,本进程记录的任务运行代次
+	closingReason     sync.Map
+	closingStarted    sync.Map
+	closingMu         sync.Mutex // serializes local epoch adoption, closing cleanup and cancellation
+	closingExecutions sync.Map   // taskID -> *closingExecution; cancels obsolete final planning/drain
+	runEpoch          sync.Map
+
 	// resolve returns a task's dedicated planner/worker (wired by the server as the
 	// authoritative task-router). nil,nil means this task is deliberately unavailable
 	// (for example an exhausted failover chain) — there is no global-pair fallback.
@@ -178,6 +189,9 @@ func (e *Engine) nextPlannerRound(taskID string) int {
 func (e *Engine) Pause(taskID string, cause error) {
 	e.paused.Store(taskID, true)
 	e.cancelExec(taskID, cause)
+	if run, ok := e.closingExecutions.Load(taskID); ok {
+		run.(*closingExecution).cancel()
+	}
 }
 
 // BeginDelete installs an execution barrier before task data/files are removed.
@@ -193,6 +207,9 @@ func (e *Engine) BeginDelete(taskID string) bool {
 	e.paused.Store(taskID, true)
 	e.deleteMu.Unlock()
 	e.cancelExec(taskID, agent.AbortTaskDeleted)
+	if run, ok := e.closingExecutions.Load(taskID); ok {
+		run.(*closingExecution).cancel()
+	}
 	return true
 }
 
@@ -285,6 +302,9 @@ func (e *Engine) StopTask(taskID string) {
 	e.stamped.Delete(taskID)
 	e.inflight.Delete(taskID)
 	e.coordStarted.Delete(taskID)
+	e.closingReason.Delete(taskID)
+	e.closingStarted.Delete(taskID)
+	e.runEpoch.Delete(taskID)
 	e.deleteMu.Lock()
 	e.deleting.Delete(taskID)
 	e.deleteMu.Unlock()
@@ -313,6 +333,10 @@ func (e *Engine) Resume(t *Task) {
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
 	if e.IsDeleting(t.ID) {
+		return
+	}
+	if err := e.resumeFromClosing(t); err != nil {
+		log.Printf("[closing] task %s resume blocked: %v", t.ID, err)
 		return
 	}
 	e.paused.Delete(t.ID)
@@ -719,6 +743,9 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 // resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
 // failover chain); there is no global-pair fallback.
 func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
+	if e.lifecycleReady != nil && !e.lifecycleReady() {
+		return nil, nil
+	}
 	if e.resolve != nil {
 		p, w := e.resolve(t)
 		if (p != nil && w != nil) || e.resolveAuthoritative {
@@ -731,7 +758,7 @@ func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
 // Ready reports whether a global LLM provider is configured (via the readiness
 // predicate wired at startup).
 func (e *Engine) Ready() bool {
-	return e.readiness != nil && e.readiness()
+	return (e.lifecycleReady == nil || e.lifecycleReady()) && e.readiness != nil && e.readiness()
 }
 
 // ReadyFor reports whether a specific task can resolve a planner/worker pair.
@@ -746,6 +773,12 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
+	if t == nil || e.m == nil || e.m.pg == nil {
+		return
+	}
+	if _, err := strconv.ParseInt(t.ID, 10, 64); err != nil {
+		return
+	}
 	workers := e.m.Workers()
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {
@@ -757,6 +790,21 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		t.Notify() // already running — just nudge a planning round
 		return
 	}
+	// V0:每次真正进入新一轮执行都分配新的运行代次,使任何残留的旧收尾协调器
+	// 失去提交资格。重复的 Run 已在上面的 started 去重处返回,不会无意义自增。
+	if id, perr := strconv.ParseInt(t.ID, 10, 64); perr == nil && e.m != nil && e.m.pg != nil {
+		if epoch, err := e.m.pg.BumpRunEpoch(ctx, id); err == nil {
+			e.runEpoch.Store(t.ID, epoch)
+		} else {
+			log.Printf("[closing] task %s 分配运行代次失败: %v", t.ID, err)
+			e.started.Delete(t.ID)
+			e.deleteMu.RUnlock()
+			return
+		}
+	}
+	e.settling.Delete(t.ID)
+	e.closingReason.Delete(t.ID)
+	e.closingStarted.Delete(t.ID)
 	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers)
 	e.deleteMu.RUnlock()
 	e.touch(t.ID)
@@ -817,6 +865,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 				break drain
 			}
 		}
+		if err := e.resumeFromClosing(t); err != nil {
+			return
+		}
 		planner, _ := e.snapshotFor(t)
 		if planner == nil {
 			return // idle until LLM configured
@@ -844,15 +895,15 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// 整段纯 Go、不触发任何 LLM 调用，也不打规划轮 marker。
 		if open, err := t.Store.HasOpenGoal(); err == nil && !open {
 			t.drainTriggers() // 丢弃累积的 done/finding 触发，避免 goalless 长会话里无界增长
+			// 收尾中:终态由收尾协调器落,这里不能抢先写 done——否则会绕过
+			// 代次校验与 drain,且与协调器的判定产生竞态。
+			if e.isSettling(t.ID) {
+				return
+			}
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
 				// pause/delete/超时收尾的状态转换。
-				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
-					log.Printf("[goalless] task %s 收尾落 done 失败: %v", t.ID, err)
-				} else if won {
-					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-						Summary: "目标已全部达成，直投意图已执行完毕，任务结束"})
-				}
+				e.enterClosing(ctx, t, db.ClosingGoalSatisfied)
 			}
 			return // goalless 分支永不进入 planner.Plan
 		}
@@ -877,6 +928,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.BeginLLMCall(t.ID)
+		planningEpoch := e.currentRunEpoch(t.ID)
 		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
 		switch {
@@ -884,14 +936,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
 		case met:
 			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
-			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
-			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
-				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
-			}
-			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
-			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
-			// 归为 stopped(而非 blocked)。
-			e.cancelExec(t.ID, agent.AbortGoalMet)
+			// V0:不再立即 cancelExec。目标达成只说明"结束条件满足",并不说明在跑的
+			// 工作没有价值——直接取消会丢弃它们的产出。改为异步收尾:先建立屏障停止
+			// 派发,再有界 drain 保存已有进度,最后落终态。协调器不计入 inflight,
+			// 因此不会像"在 planner 轮内同步等待"那样把自己等进死锁。
+			e.enterClosingAtEpoch(ctx, t, db.ClosingGoalSatisfied, planningEpoch)
 		default:
 			log.Printf("[planner] task %s 规划完成", t.ID)
 		}
@@ -919,6 +968,12 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 		case <-ctx.Done():
 			return
 		default:
+		}
+		if err := e.resumeFromClosing(t); err != nil {
+			if sleepCtx(ctx, time.Second) {
+				return
+			}
+			continue
 		}
 		_, worker := e.snapshotFor(t)
 		if worker == nil {
@@ -963,7 +1018,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 // runIntent. Returns false when nothing was claimable. The pool worker loop is its
 // only caller.
 func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
-	intent := e.claimNext(t, name)
+	intent := e.claimNext(ctx, t, name)
 	if intent == nil {
 		return false
 	}
@@ -1097,13 +1152,17 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 		return true
 	}
-	// 任务超时收尾的硬兜底 cancel(非 pause、非 kill)取消了本 run → 归为 exhausted(已收尾),
-	// 不要误标 blocked。此时 worker 通常已在 settlement 阶段把结果写回。
+	// 任务收尾期被硬取消(非 pause、非 kill)→ 终态由**取消原因**决定,不能因为
+	// isSettling=true 就一律记为"超时 exhausted":
+	//   goal_satisfied → stopped(目标是达成,不是耗尽预算)
+	//   deadline / budget_exhausted → exhausted(确实被预算掐断)
 	if ectx.Err() != nil && e.isSettling(t.ID) {
-		if err := transitionIntentState(t.Store, intent.ID, "running", "exhausted"); err != nil {
-			log.Printf("[worker %s] task %s 意图 #%d 超时收尾状态落库失败: %v", name, t.ID, intent.ID, err)
+		reason, _ := e.closingSnapshot(t.ID)
+		finalState := intentFinalStateOnClosing(reason)
+		if err := transitionIntentState(t.Store, intent.ID, "running", finalState); err != nil {
+			log.Printf("[worker %s] task %s 意图 #%d 收尾状态落库失败: %v", name, t.ID, intent.ID, err)
 		}
-		log.Printf("[worker %s] task %s 意图 #%d 因任务超时收尾结束(exhausted)，写回 %s", name, t.ID, intent.ID, wrote)
+		log.Printf("[worker %s] task %s 意图 #%d 因任务收尾结束(%s)，写回 %s", name, t.ID, intent.ID, finalState, wrote)
 		e.touch(t.ID)
 		return true
 	}
@@ -1234,10 +1293,22 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 	}
 }
 
-func (e *Engine) claimNext(t *Task, name string) *db.Node {
+func (e *Engine) claimNext(ctx context.Context, t *Task, name string) *db.Node {
+	taskID, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil || e.m == nil || e.m.pg == nil {
+		return nil
+	}
 	fr, _ := t.Store.Frontier(20)
 	for _, in := range fr {
-		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {
+		// 领取走 db.ClaimIntentGuarded:它在同一事务内先锁任务行,确认任务不在
+		// 收尾/终态/删除中,再做 open→running 的 CAS。这与 EnterClosing 争同一把
+		// 行锁,因此"claim 先胜"与"closing 先胜"两条时序都是确定的。
+		ok, cerr := e.m.pg.ClaimIntentGuarded(ctx, taskID, in.ID, name, e.currentRunEpoch(t.ID))
+		if cerr != nil {
+			log.Printf("[worker %s] task %s 领取意图 #%d 失败: %v", name, t.ID, in.ID, cerr)
+			continue
+		}
+		if ok {
 			return in
 		}
 	}

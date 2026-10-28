@@ -16,7 +16,7 @@ func TestInheritedActivityDetailAndRelationDeletion(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 
 	source, err := m.CreateTaskWithOptions("detail source", "source goal", db.TaskCreateOptions{})
 	if err != nil {
@@ -52,7 +52,14 @@ func TestInheritedActivityDetailAndRelationDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := New(context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
+	// This test exercises read permissions and relation deletion, not task
+	// execution. Do not resume unrelated shared-DB tasks or leave live services
+	// writing into TempDir after the test has closed its manager.
+	serviceCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s := New(serviceCtx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	s.archiveWG.Wait()
+	<-s.side.done
 	token, err := signJWT(s.jwtKey)
 	if err != nil {
 		t.Fatal(err)

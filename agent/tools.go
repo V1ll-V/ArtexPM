@@ -443,8 +443,21 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// via node_detail(id).
 	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
-	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	// 确认漏洞数 = **当前有效判定**为 supported 的 finding;候选不计数,过期判定也不计数。
+	// 这是 V1 的单一读取路径:计数、目标判定、列表必须共用同一判据。
+	allStates := t.findingVerdictStates(vulnNodes)
+	projections := t.findingProjections(vulnNodes)
+	effective, pending := splitEffectiveFindings(vulnNodes, allStates)
+	out["findings_total"] = len(effective) // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
+	out["candidates_total"] = len(pending) // 候选/待验收/已否定:可用于补证据与避免重复登记,但不能证明目标
+	// awaiting_goal_evaluations:已提交验收、等待评估的目标数。frontier 为空且
+	// 该值 >0 时应当**等待**,而不是按硬底线重复提交证明或强派新探索。
+	if awaiting, err := t.ts.CountPendingGoalEvaluations(); err == nil {
+		out["awaiting_goal_evaluations"] = awaiting
+	} else {
+		out["awaiting_goal_evaluations"] = 0
+	}
+	out["facts"] = len(factNodes) // 探索事实/结论数（含否定结论）
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -458,6 +471,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		var fp map[string]any
 		_ = json.Unmarshal(n.Payload, &fp)
 		m := map[string]any{"id": n.ID, "summary": fp["summary"]}
+		m["technical_verdict"], m["effective"] = findingVerdictLabel(allStates[n.ID]), db.FindingVerdictEffective(allStates[n.ID])
+		p, ok := projections[n.ID]
+		applyFindingProjection(m, p, ok)
 		if from := factFrom[n.ID]; from > 0 {
 			m["from_intent"] = from // 本漏洞由哪个意图产生
 		}
@@ -525,6 +541,44 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		{
 			m := map[string]any{}
 			if !t.coverageDisabled {
+				if rows, err := t.as.ListTaskScope(t.taskID); err == nil {
+					scope := make([]map[string]any, 0, len(rows))
+					for _, row := range rows {
+						entry := map[string]any{"kind": row.Kind, "source": row.Source, "value": row.Value}
+						if row.Domain != "" {
+							entry["value"] = row.Domain
+						}
+						if row.Net != "" {
+							entry["value"] = row.Net
+						}
+						if row.CompanyID != nil && t.cs != nil {
+							entry["company_id"], entry["company_name"] = *row.CompanyID, row.CompanyName
+							if rules, err := t.cs.GetScope(*row.CompanyID); err == nil {
+								companyScope := make([]map[string]any, 0, len(rules))
+								keywords := []string{}
+								for _, rule := range rules {
+									value := rule.Raw
+									if value == "" {
+										value = rule.Value
+									}
+									if value == "" && rule.Domain != "" {
+										value = rule.Domain
+									}
+									if value == "" && rule.Net != "" {
+										value = rule.Net
+									}
+									companyScope = append(companyScope, map[string]any{"kind": rule.Kind, "value": value})
+									if rule.Kind == "keyword" {
+										keywords = append(keywords, value)
+									}
+								}
+								entry["company_scope"], entry["company_keywords"] = companyScope, keywords
+							}
+						}
+						scope = append(scope, entry)
+					}
+					m["scope"] = scope
+				}
 				if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
 					m["denominator"] = cov.Denominator
 					m["tested"] = cov.Tested
@@ -899,7 +953,7 @@ func compactFinding(n *db.Node) map[string]any {
 }
 
 func (t *ToolSet) listFindings() actool.CoreTool {
-	return t.readExpTool("list_findings", "列本任务及直接关联任务的【确认漏洞】(紧凑：id+task_id+intent_id+vulnclass+severity+摘要+状态)。关联任务条目带 source_task_id/inherited=true 且只读。这里只含漏洞；普通探索事实用 list_facts，详情用 node_detail(id)。",
+	return t.readExpTool("list_findings", "列本任务及直接关联任务的【漏洞发现】(紧凑：id+task_id+intent_id+vulnclass+severity+摘要+状态+technical_verdict+effective)。technical_verdict=supported 且 effective=true 的才可用于证明漏洞类目标；unverified/needs_review/stale/refuted 均为候选或已否定，可用于补证据与避免重复登记，但不能作为完成依据。关联任务条目带 source_task_id/inherited=true 且只读。普通探索事实用 list_facts，详情用 node_detail(id)。",
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
 			f, _ := t.ts.ListByKindWithSources(db.KindFinding, 500)
@@ -912,8 +966,20 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 				taskID, _ = t.ts.TaskID()
 			}
 			out := make([]map[string]any, 0, len(f))
+			states := t.findingVerdictStates(f)
+			projections := t.findingProjections(f)
+			effective, pending := splitEffectiveFindings(f, states)
+			effectiveSet := map[int64]bool{}
+			for _, n := range effective {
+				effectiveSet[n.ID] = true
+			}
 			for _, n := range f {
 				m := compactFinding(n)
+				st := states[n.ID]
+				m["technical_verdict"] = findingVerdictLabel(st)
+				m["effective"] = effectiveSet[n.ID]
+				p, ok := projections[n.ID]
+				applyFindingProjection(m, p, ok)
 				if n.FindingID > 0 {
 					m["finding_id"], m["finding_node_id"], m["traffic_count"] = n.FindingID, n.ID, n.TrafficCount
 				}
@@ -927,6 +993,7 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 				}
 				out = append(out, m)
 			}
+			_ = pending
 			return jsonResult(out)
 		})
 }
@@ -1011,7 +1078,16 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
-			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
+			if n.Kind == db.KindFinding {
+				data := map[string]json.RawMessage{}
+				raw, _ := json.Marshal(n)
+				_ = json.Unmarshal(raw, &data)
+				if p, ok := t.findingProjections([]*db.Node{n})[n.ID]; ok {
+					data["verification"], _ = json.Marshal(p)
+				}
+				return jsonResult(data)
+			}
+			return jsonResult(n)
 		})
 }
 
@@ -1155,13 +1231,13 @@ func (t *ToolSet) listGoals() actool.CoreTool {
 }
 
 func (t *ToolSet) proveGoal() actool.CoreTool {
-	return t.writeExpTool("prove_goal", "当你判断某个发现/事实证明了某个目标达成时调用：把证据节点连到目标节点，并标记目标 met。",
+	return t.writeExpTool("prove_goal", "提交事实或有效漏洞作为目标证据，进入独立验收；提交后为 submitted，只有验收确认满足目标要求才会标记 met。",
 		obj(map[string]any{
 			"goal_id":     idp("目标节点 id"),
 			"evidence_id": idp("证明它的发现/事实节点 id"),
 			"reason":      str("为什么这个证据满足该目标"),
 		}, "goal_id", "evidence_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				GoalID     json.RawMessage `json:"goal_id"`
 				EvidenceID json.RawMessage `json:"evidence_id"`
@@ -1180,47 +1256,50 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
-			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
-			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
-			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
-				allMet := true
-				for _, g := range goals {
-					if g.State != "met" {
-						allMet = false
-						break
-					}
-				}
-				if allMet {
-					t.GoalMet = true
-					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", len(goals), goal)
-					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，任务自动判定完成", goal)), nil
+			// 漏洞类证据必须**当前有效**:未通过验收、判定已过期、或人工已否定的
+			// finding 不能用于证明目标。候选发现再"真实"也只是候选,不能用普通
+			// fact 包装绕过受支持证据要求。
+			if evidenceNode.Kind == db.KindFinding {
+				states, _ := t.ts.FindingVerdictStates([]int64{ev})
+				st, ok := states[ev]
+				if !ok || !db.FindingVerdictEffective(st) {
+					return actool.Errorf(fmt.Sprintf("漏洞节点 #%d 尚未通过验收(technical_verdict=%s)，不能用于证明目标。请先补齐证据等待验收，或改用已通过验收的发现。", ev, st.TechnicalVerdict)), nil
 				}
 			}
-			return actool.Text(fmt.Sprintf("goal %d marked met", goal)), nil
+			// V1:目标证明必须落成**持久化验收请求**,不能只是内存里的状态位。
+			// 请求带幂等键(goal + 输入版本),重复提交不会产生第二个任务。
+			jobID, jerr := t.ts.SubmitGoalEvidence(ctx, goal, ev, a.Reason)
+			if jerr != nil {
+				return actool.Errorf(fmt.Sprintf("提交目标验收失败: %v", jerr)), nil
+			}
+			_, pending, err := t.ts.GoalEvaluationState(goal)
+			if err != nil {
+				return actool.Errorf(fmt.Sprintf("读取验收状态失败: %v", err)), nil
+			}
+			if !pending {
+				return actool.Text(fmt.Sprintf("goal %d 的相同输入已有验收请求 #%d；请读取目标状态与验收结果，只有补充有效证据后再提交。", goal, jobID)), nil
+			}
+			return actool.Text(fmt.Sprintf("goal %d 已提交验收(请求 #%d，状态 submitted)。事实与漏洞证据均须独立核对是否满足本目标；提交不等于目标达成。", goal, jobID)), nil
 		})
 }
 
 func (t *ToolSet) goalMet() actool.CoreTool {
-	return writeTool("goal_met", "【立即结束整个任务】——仅当你确认任务的【全部目标都已真正达成、整体收官】时才调（注意是任务【整体】完成；仅仅达成了其中某一个目标/某一个 flag/某一个漏洞【不算】——那种情况用 prove_goal 标记该目标即可）。⚠️它不是用来“结束本轮规划”的：本轮没有新意图要派、或在等 worker 产出，都【直接结束本轮即可，不要调本工具】（0 个意图是完全正常的）。正常判定优先用 prove_goal 逐个证明目标；goal_met 只是绕过逐个证明、直接从全局收官的手段。",
+	return writeTool("goal_met", "旧兼容入口，已禁止直接宣布整个任务完成。请用 prove_goal 提交证据并等待各目标独立验收；无新工作时直接结束本轮。",
 		obj(map[string]any{"reason": str("达成理由（必须是目标真正达成的证据，不能是“本轮无新方向”这类结束本轮的理由）")}, "reason"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
-			var a struct{ Reason string }
-			_ = json.Unmarshal(in, &a)
-			t.GoalMet = true
-			t.Reason = a.Reason
-			return actool.Text("acknowledged: goal marked met"), nil
+			return actool.Errorf("goal_met 已关闭全局完成旁路。请用 prove_goal 提交各目标的证明材料，等待独立验收；没有新工作时直接结束本轮。"), nil
 		})
 }
 
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
+	return writeTool("report_finding", "登记**候选**漏洞（它不是「已确认漏洞」）：记录你观察到的现象与证据，系统会独立验收后才决定它能否成为受支持发现、能否用于证明目标。任务上下文传当前 intent_id。S3 再验证同一漏洞时传既有 finding_id，不会新建记录。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
 		"evidence":         str("证据/PoC 文本"),
+		"finding_id":       idp("可选：既有漏洞记录 ID（独立 finding_id，不是节点 ID）。S3 追加验证同一漏洞时必填——填了就不会新建漏洞，而是把本次验证与证据追加到该漏洞并重新触发验收"),
+		"preconditions":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选：该结论成立所依赖的适用前提（账号类型、租户、特定客户端、站点状态等）。前提进入验收输入清单；前提缺失时验收只会指出证据缺口，不会补成肯定结论"},
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
@@ -1231,6 +1310,8 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
 			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
+			ExistingFindingID                            json.RawMessage   `json:"finding_id"`
+			Preconditions                                []string          `json:"preconditions"`
 		}
 		if err := json.Unmarshal(in, &a); err != nil {
 			return actool.Errorf(err.Error()), nil
@@ -1253,7 +1334,8 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs),
+			ExistingFindingID: pid(a.ExistingFindingID), Preconditions: a.Preconditions, Actor: t.worker}
 		var recorded *db.RecordedFinding
 		if t.findingRecorder != nil {
 			recorded, err = t.findingRecorder.Record(ctx, input, refs)
@@ -1282,18 +1364,29 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		}
 		result := struct {
 			*db.RecordedFinding
-			EvidenceStatus string `json:"evidence_status"`
-			EvidenceNote   string `json:"evidence_note,omitempty"`
-		}{RecordedFinding: recorded, EvidenceStatus: "bound"}
+			EvidenceStatus   string `json:"evidence_status"`
+			EvidenceNote     string `json:"evidence_note,omitempty"`
+			TechnicalVerdict string `json:"technical_verdict"`
+			InputRevision    int64  `json:"input_revision"`
+			BindingStatus    string `json:"binding_status"`
+			Accepted         bool   `json:"accepted"`
+		}{RecordedFinding: recorded, EvidenceStatus: "bound", TechnicalVerdict: db.VerdictUnverified, BindingStatus: "bound"}
 		if len(recorded.Traffic.Bindings) == 0 {
 			result.EvidenceStatus = "not_bound"
-			result.EvidenceNote = "漏洞已保存，未绑定流量。TCP/无包情形可正常继续；若已有核实的 HTTP 流量，请用可用的 bind_finding_traffic 或漏洞页面补绑，再完成证据交接。不要重复创建漏洞。"
+			result.BindingStatus = "none"
+			result.EvidenceNote = "候选已保存，未绑定流量。TCP/无包情形可正常继续；若已有核实的 HTTP 流量，请用可用的 bind_finding_traffic 或漏洞页面补绑，再完成证据交接。不要重复创建漏洞。"
 			if !findingTrafficBindingEnabled() {
-				result.EvidenceNote = "漏洞已保存。Agent 自动绑定流量已关闭，可在页面人工关联流量。"
+				result.EvidenceNote = "候选已保存。Agent 自动绑定流量已关闭，可在页面人工关联流量。"
 			}
 		}
 		raw, _ := json.Marshal(result)
-		return actool.Text(fmt.Sprintf("finding recorded: %d\n%s", recorded.NodeID, raw)), nil
+		// 返回语义必须如实:这是候选,不是已确认漏洞。旧文案 "finding recorded"
+		// 会让模型把它当成已确认知识继续复用(#39 的成因之一)。
+		head := fmt.Sprintf("candidate recorded: %d (technical_verdict=unverified, 待独立验收；未通过验收前不得用于证明漏洞类目标)", recorded.NodeID)
+		if pid(a.ExistingFindingID) > 0 {
+			head = fmt.Sprintf("verification appended to finding %d (node %d, technical_verdict=unverified, 已重新排入验收)", recorded.FindingID, recorded.NodeID)
+		}
+		return actool.Text(head + "\n" + string(raw)), nil
 	})
 }
 

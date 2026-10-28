@@ -13,6 +13,7 @@ import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingReviewPanel } from "@/components/finding-review-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
+import { FindingVerdictBadge, FindingVerdictScope } from "@/components/finding-verdict";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -22,7 +23,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api } from "@/lib/api";
+import { api, http } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingStatus, Severity } from "@/lib/types";
 
@@ -59,6 +60,7 @@ function FindingDetailInner() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
   const contextTaskId = searchParams.get("context_task") ?? "";
+  const [verifying, setVerifying] = React.useState(false);
   const [finding, setFinding] = React.useState<Finding | null>(null);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
@@ -146,7 +148,12 @@ function FindingDetailInner() {
           </h1>
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">#{finding.id}</code>
           <Separator orientation="vertical" className="mx-1 h-4" />
-          <StatusBadge domain="severity" value={finding.severity} dot />
+          {finding.effective && !finding.display_severity ? (
+            <Badge variant="outline">等级未独立确认</Badge>
+          ) : (
+            <StatusBadge domain="severity" value={finding.display_severity || finding.severity} dot />
+          )}
+          <FindingVerdictBadge finding={finding} />
           <StatusBadge domain="finding" value={finding.status} dot />
           {finding.review_decision ? <StatusBadge domain="review" value={finding.review_decision} dot /> : null}
           {finding.inherited && finding.source_task_id && (
@@ -171,7 +178,36 @@ function FindingDetailInner() {
                   <CardTitle className="text-sm">摘要</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{finding.summary || "（无摘要）"}</p>
+                  <FindingVerdictScope finding={finding} />
+                  {!finding.inherited ? (
+                    <Button
+                      className="mt-3"
+                      size="sm"
+                      variant="outline"
+                      disabled={verifying}
+                      onClick={async () => {
+                        setVerifying(true);
+                        try {
+                          await http(`/exploration/findings/${id}/verification`, {
+                            method: "POST",
+                            body: JSON.stringify({
+                              review_request_id:
+                                globalThis.crypto?.randomUUID?.() ??
+                                `review-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                            }),
+                          });
+                          toast.success("已提交本地证据验收；保留现有人工决定");
+                          await load();
+                        } catch (e) {
+                          toast.error((e as Error).message);
+                        } finally {
+                          setVerifying(false);
+                        }
+                      }}
+                    >
+                      重新验收本地证据
+                    </Button>
+                  ) : null}
                 </CardContent>
               </Card>
               <FindingReviewPanel
@@ -223,7 +259,9 @@ function FindingDetailInner() {
                   ) : null}
                   {finding.report_stale ? (
                     <Alert>
-                      <AlertDescription>流量证据已变更，详细报告待更新。</AlertDescription>
+                      <AlertDescription>
+                        验收范围、人工决定或证据已变化。以下报告已失效，仅供历史追溯。
+                      </AlertDescription>
                     </Alert>
                   ) : null}
                   {finding.report ? (

@@ -108,6 +108,9 @@ func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
 }
 
 func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
+	if mode != "bootstrap" && s.engine.lifecycleReady != nil && !s.engine.lifecycleReady() {
+		return false, fmt.Errorf("验收生命周期尚未启用或配置未就绪；检查 /api/verification/readiness")
+	}
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
@@ -243,6 +246,11 @@ func (s *Server) startAdmittedTask(t *Task, mode string) {
 		return
 	}
 	s.engine.Run(s.ctx, t)
+	if !s.engine.Started(t.ID) {
+		// Run failed to allocate its persistent generation. Do not bypass that
+		// failure by unpausing or launching a separate deadline coordinator.
+		return
+	}
 	s.engine.Resume(t)
 	// Run returns early for an already-started task. Explicitly ensure a timeout
 	// coordinator exists after resume; resetTimeoutRevival cleared the completed
@@ -370,6 +378,16 @@ func (s *Server) reviveTask(t *Task) {
 // emit, when non-nil, is forwarded to DecomposeGoals so LLM steps are visible in the UI.
 func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity)) []goalSpec {
 	if t == nil {
+		return nil
+	}
+	// Disabled instances can still prepare a task and retain the user's exact
+	// goal. They must not invoke an LLM even for the initial decomposition.
+	if s.engine.lifecycleReady != nil && !s.engine.lifecycleReady() {
+		if text := strings.TrimSpace(t.Goal); text != "" {
+			if _, err := t.Store.AddGoal(map[string]any{"text": text}, "user"); err == nil {
+				return []goalSpec{{Text: text}}
+			}
+		}
 		return nil
 	}
 	// Use the SAME LLM the task runs on (its pinned profile, else the active profile),

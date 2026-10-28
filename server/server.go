@@ -51,15 +51,20 @@ type Server struct {
 	// free slots off the same snapshot and over-promote past the limit.
 	concMu sync.Mutex
 
-	cfgMu     sync.Mutex
-	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
+	cfgMu           sync.Mutex
+	storageHealthAt time.Time
+	storageHealthy  bool
+	chatAgent       *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
 	// llmProv is the fully-decorated global provider (recorder + failover chain)
 	// installed by applyLLM. Task routers use it after an explicit chain is cleared.
 	llmProv   llm.Provider
 	llmDirect llm.Provider // concrete global provider, before any failover pool
 	llmCfg    agent.Config // current LLM config (key not exposed)
 	llmOn     bool
-	llmProf   string // active LLM profile name (for llmrec tagging)
+	// verifier 是验收器实现(测试注入假实现;nil 且 llmProv 非 nil 时用 LLM 构造)。
+	verifier     agent.Verifier
+	reportWriter agent.ReportWriter
+	llmProf      string // active LLM profile name (for llmrec tagging)
 
 	// chatBusy guards the per-task main-agent run: the chat handler launches the
 	// agent on the server's background ctx (not the request ctx) and returns
@@ -151,6 +156,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+	s.engine.lifecycleReady = s.lifecycleRunnable
 	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
@@ -228,6 +234,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.seedFindingReviewer(); err != nil {
 			log.Printf("[reviewer] seed: %v", err)
 		}
+		migrationCtx, migrationCancel := context.WithTimeout(context.WithoutCancel(s.ctx), 30*time.Second)
+		if result, err := s.migrateVerificationConfig(migrationCtx); err != nil {
+			log.Printf("[verification] configuration migration failed; retry available: %v", err)
+		} else if result.State != "ready" {
+			log.Printf("[verification] configuration preserved for review; inspect /api/verification/config-migration")
+		}
+		migrationCancel()
 		go s.evidenceStore().RunGC(s.ctx)
 		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
@@ -278,10 +291,20 @@ func (s *Server) restoreTaskRuntimes() {
 		if lifecycle.Paused {
 			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
 		}
-		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
-		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
-		if !isTerminalStatus(lifecycle.Status) {
-			s.engine.startDeadlineCoordinator(s.ctx, t)
+		// Queued work stays queued, but a pre-crash closing must not survive
+		// forever behind admission. Run does the same revocation for other tasks.
+		if lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
+			id, err := strconv.ParseInt(t.ID, 10, 64)
+			if err == nil {
+				var epoch int64
+				epoch, err = m.pg.BumpRunEpoch(s.ctx, id)
+				if err == nil {
+					s.engine.runEpoch.Store(t.ID, epoch)
+				}
+			}
+			if err != nil {
+				log.Printf("[closing] queued task %s recovery failed: %v", t.ID, err)
+			}
 		}
 	}
 	// Restore every task that had already been admitted before shutdown. Starting
@@ -771,6 +794,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/{id}/reviews", s.listFindingReviews)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/reviews", s.startFindingReview)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}/review", s.decideFindingReview)
+	mux.HandleFunc("POST /api/exploration/findings/{id}/verification", s.requestFindingVerification)
+	mux.HandleFunc("GET /api/verification/config-migration", s.getVerificationConfigMigration)
+	mux.HandleFunc("GET /api/verification/readiness", s.getLifecycleReadiness)
+	mux.HandleFunc("POST /api/verification/lifecycle", s.setLifecycleEnabled)
+	mux.HandleFunc("POST /api/verification/config-migration/retry", s.retryVerificationConfigMigration)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
@@ -3839,8 +3867,19 @@ func (s *Server) fallbackChat(t *Task, msg string) string {
 			assets += c
 		}
 		fnd, _ := t.Store.ListByKind(db.KindFinding, 1000)
+		ids := make([]int64, 0, len(fnd))
+		for _, n := range fnd {
+			ids = append(ids, n.ID)
+		}
+		states, _ := t.Store.FindingVerdictStates(ids)
+		confirmed := 0
+		for _, st := range states {
+			if db.FindingVerdictEffective(st) {
+				confirmed++
+			}
+		}
 		fr, _ := t.Store.Frontier(1000)
-		return fmt.Sprintf("（规则模式，未配置 LLM）当前态势：资产 %d，待领意图 %d，确认发现 %d。\n可用指令：以\"意图 ...\"注入意图，\"提示 ...\"给规划者提示。", assets, len(fr), len(fnd))
+		return fmt.Sprintf("（规则模式，未配置 LLM）当前态势：资产 %d，待领意图 %d，当前有效确认 %d，候选等其他发现 %d。\n可用指令：以\"意图 ...\"注入意图，\"提示 ...\"给规划者提示。", assets, len(fr), confirmed, len(fnd)-confirmed)
 	}
 }
 
@@ -3850,18 +3889,22 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no active task")
 		return
 	}
-	findings, _ := t.Store.ListByKind(db.KindFinding, 1000) // 纯漏洞（事实是独立的 KindFact，不进报告）
-	counts := map[string]int{}
-	for _, ty := range []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint"} {
-		ns, _ := s.m.Assets().QueryByType(ty, 100000, 0)
-		if len(ns) > 0 {
-			counts[ty] = len(ns)
+	findings, err := s.m.pg.ListFindingsForExport(db.FindingFilter{TaskID: t.ID}, nil)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if err = s.evidenceStore().StageFindingsExport(r.Context(), findings, "", false); err != nil {
+		evidenceError(w, err)
+		return
+	}
+	accepted := make([]*db.DBFinding, 0, len(findings))
+	for _, f := range findings {
+		if f.Projection().Effective {
+			accepted = append(accepted, f)
 		}
 	}
-	md := report.Markdown(report.Input{
-		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
-		AssetCounts: counts, Findings: findings,
-	})
+	md := fmt.Sprintf("# 任务报告 — %s\n\n当前有效确认 %d 项；候选、已否定或过期记录 %d 项，不计入确认。\n\n", t.Description, len(accepted), len(findings)-len(accepted)) + report.FindingsMarkdown(accepted, time.Now())
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.WriteHeader(200)
 	_, _ = w.Write([]byte(md))

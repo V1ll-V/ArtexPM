@@ -664,7 +664,9 @@ export default function FindingsPage() {
       setReports((r) => ({ ...r, [key]: { status: "loading", text: "" } }));
       api
         .getFinding(fid)
-        .then((full) => setReports((r) => ({ ...r, [key]: { status: "done", text: full.report ?? "" } })))
+        .then((full) =>
+          setReports((r) => ({ ...r, [key]: { status: "done", text: full.report ?? "", finding: full } })),
+        )
         .catch(() => setReports((r) => ({ ...r, [key]: { status: "error", text: "" } })));
     },
     [expanded, reports],
@@ -762,10 +764,10 @@ export default function FindingsPage() {
   }
 
   const statCards = [
-    { label: "发现总数", value: stats.total, icon: BugIcon },
+    { label: "记录总数（含候选）", value: stats.total, icon: BugIcon },
     { label: "待处理", value: stats.pending, tone: "text-amber-500", icon: ClockIcon },
-    { label: "严重", value: stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
-    { label: "高危", value: stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
+    { label: "严重等级记录（含候选）", value: stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
+    { label: "高危等级记录（含候选）", value: stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
     { label: "中危", value: stats.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
     { label: "低危", value: stats.low, tone: "text-slate-500", icon: InfoIcon },
   ];

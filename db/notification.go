@@ -480,7 +480,16 @@ func (d *DB) SetFindingStatusWithNotify(ctx context.Context, id int64, status st
 //
 // 返回 from=变更前状态、found=漏洞是否存在、changed=状态是否真的变了、
 // notified=事件是否登记成功（登记失败不影响状态更新，见 RecordNotificationEventTx）。
-func SetFindingStatusTx(ctx context.Context, tx *sql.Tx, id int64, status string) (from string, found bool, changed bool, notified bool, err error) {
+func SetFindingStatusTx(ctx context.Context, tx *sql.Tx, id int64, status string, recordHuman ...bool) (from string, found bool, changed bool, notified bool, err error) {
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return
+	}
+	if err = LockFindingEvidenceTx(tx, id, nil); err != nil {
+		if errors.Is(err, ErrFindingNotFound) {
+			return "", false, false, false, nil
+		}
+		return
+	}
 	var (
 		vulnclass, name, severity, summary string
 		taskID                             sql.NullInt64
@@ -496,6 +505,22 @@ FROM findings WHERE id=$1 FOR UPDATE`, id).
 		return "", false, false, false, scanErr
 	}
 	found = true
+	// V1:人工"确认/误报"在**同一事务**内转成带 human_revision 的技术决定。
+	// 只有这两个处置状态携带技术真实性含义;ignored/duplicate/resolved 等
+	// 只表达处置,不得推导技术结论。
+	if len(recordHuman) == 0 || recordHuman[0] {
+		switch status {
+		case FindingFalsePositive:
+			if _, err := RecordHumanDecisionTx(tx, id, HumanDecisionRefuted, "api_status", "", "human"); err != nil {
+				return from, true, false, false, err
+			}
+		case FindingConfirmed:
+			if _, err := RecordHumanDecisionTx(tx, id, HumanDecisionSupported, "api_status", "", "human"); err != nil {
+				return from, true, false, false, err
+			}
+		}
+
+	}
 	if from == status {
 		// 状态没有真的变化就不登记事件：重复提交同一个值、幂等重放都不该
 		// 产生推送噪音。

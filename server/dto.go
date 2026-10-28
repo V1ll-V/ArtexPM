@@ -303,6 +303,7 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
+	db.FindingProjection
 	TrafficCount          int                        `json:"traffic_count"`
 	EvidenceVersion       int64                      `json:"evidence_version"`
 	ReportEvidenceVersion int64                      `json:"report_evidence_version"`
@@ -386,14 +387,15 @@ func findingDTO(n *db.Node) FindingDTO {
 	var p findingPayload
 	_ = json.Unmarshal(n.Payload, &p)
 	d := FindingDTO{
-		ID:        i64s(n.ID),
-		VulnClass: p.VulnClass,
-		Name:      p.Name,
-		Severity:  p.Severity,
-		Status:    db.FindingPending,
-		Summary:   p.Summary,
-		Evidence:  rawString(p.Evidence),
-		TS:        rfc3339(n.CreatedAt),
+		FindingProjection: (&db.DBFinding{Summary: p.Summary, Severity: p.Severity}).Projection(),
+		ID:                i64s(n.ID),
+		VulnClass:         p.VulnClass,
+		Name:              p.Name,
+		Severity:          p.Severity,
+		Status:            db.FindingPending,
+		Summary:           p.Summary,
+		Evidence:          rawString(p.Evidence),
+		TS:                rfc3339(n.CreatedAt),
 	}
 	if n.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(n.SourceTaskID)
@@ -419,6 +421,12 @@ func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int
 		d.TaskID = taskID
 		d.TaskDescription = description
 		if m, ok := meta[n.ID]; ok {
+			if m.Finding != nil {
+				row := findingFromDB(m.Finding, assets)
+				row.ID, row.TaskID, row.TaskDescription = d.ID, taskID, description
+				row.SourceTaskID, row.Inherited = d.SourceTaskID, d.Inherited
+				d = row
+			}
 			d.FindingID = i64s(m.ID)
 			d.Status = m.Status
 			d.TrafficCount = m.TrafficCount
@@ -449,10 +457,11 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		status = db.FindingPending
 	}
 	d := FindingDTO{
-		ID:           i64s(f.ID),
-		FindingID:    i64s(f.ID),
-		TrafficCount: f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
-		ReportStale: f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion, TrafficBindings: f.TrafficBindings,
+		FindingProjection: f.Projection(),
+		ID:                i64s(f.ID),
+		FindingID:         i64s(f.ID),
+		TrafficCount:      f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
+		ReportStale: f.ReportIsStale(), TrafficBindings: f.TrafficBindings,
 		VulnClass:      f.VulnClass,
 		Name:           f.Name,
 		Severity:       f.Severity,

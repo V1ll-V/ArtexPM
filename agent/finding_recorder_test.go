@@ -33,7 +33,7 @@ func TestReportFindingOptionalTrafficWithoutCapture(t *testing.T) {
 	ts.notifyFinding = func(int64, string) { notices++ }
 	for _, refs := range []string{"", `,"traffic_refs":[]`, `,"traffic_refs":null`} {
 		res, err := ts.addFinding().Call(t.Context(), json.RawMessage(`{"vulnclass":"TCP","severity":"low","summary":"verified TCP fixture","evidence":"command output proves the finding"`+refs+`}`), nil)
-		if err != nil || !strings.HasPrefix(res.Flatten(), "finding recorded: ") {
+		if err != nil || !strings.HasPrefix(res.Flatten(), "candidate recorded: ") || !strings.Contains(res.Flatten(), "technical_verdict=unverified") {
 			t.Fatalf("optional traffic rejected: %v %s", err, res.Flatten())
 		}
 		var out db.RecordedFinding
@@ -43,6 +43,10 @@ func TestReportFindingOptionalTrafficWithoutCapture(t *testing.T) {
 		f, err := d.GetFinding(out.FindingID)
 		if err != nil || f == nil || len(out.Traffic.Bindings) != 0 || f.Evidence != "command output proves the finding" {
 			t.Fatalf("lost non-HTTP evidence: %+v %v", f, err)
+		}
+		verdict, _, err := d.FindingVerdictByID(t.Context(), out.FindingID)
+		if err != nil || db.FindingVerdictEffective(verdict.State()) {
+			t.Fatal("candidate was promoted without verification", verdict, err)
 		}
 	}
 	if notices != 3 {
@@ -92,12 +96,19 @@ func TestReportFindingAtomicContract(t *testing.T) {
 	if err = json.Unmarshal([]byte(lines[1]), &out); err != nil {
 		t.Fatal(err)
 	}
-	if lines[0] != fmt.Sprintf("finding recorded: %d", out.NodeID) || out.FindingID <= 0 || notices != 1 {
+	if !strings.HasPrefix(lines[0], fmt.Sprintf("candidate recorded: %d (", out.NodeID)) || !strings.Contains(lines[0], "technical_verdict=unverified") || out.FindingID <= 0 || notices != 1 {
 		t.Fatal(got)
 	}
 	f, err := d.GetFinding(out.FindingID)
 	if err != nil || f == nil || f.NodeID == nil || *f.NodeID != out.NodeID {
 		t.Fatalf("wrong finding/node mapping: %+v %v", f, err)
+	}
+	var state struct {
+		TechnicalVerdict string `json:"technical_verdict"`
+		Accepted         bool   `json:"accepted"`
+	}
+	if err = json.Unmarshal([]byte(lines[1]), &state); err != nil || state.TechnicalVerdict != db.VerdictUnverified || state.Accepted {
+		t.Fatal("candidate response claims acceptance", state, err)
 	}
 	if got = call(`{"vulnclass":"TEST","summary":"no storage","severity":"low","traffic_refs":[{"traffic_id":"x"}]}`); !strings.Contains(got, "未登记") {
 		t.Fatal(got)

@@ -135,7 +135,9 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 		t.Fatal("ambiguous ID error", wrong)
 	}
 	input["finding_id"] = recorded.FindingID
-	// Duplicate append preserves metadata and version.
+	// Replaying the same full binding preserves metadata and version. Changes to
+	// role/note are real verification inputs and intentionally advance revisions.
+	input["traffic_refs"] = refs
 	workflowCall(t, ctx, bind, input, false)
 	after, err := pg.GetFindingTraffic(ctx, recorded.FindingID)
 	if err != nil || len(after.Bindings) != 3 || after.Version != recorded.Traffic.Version || after.Bindings[0].Note != refs[0].Note {
@@ -304,7 +306,9 @@ func TestFindingWorkflowReporterBindsBeforeWritingReport(t *testing.T) {
 	if err := json.Unmarshal([]byte(list), &summary); err != nil || summary.Version != 1 {
 		t.Fatal(list, err)
 	}
-	workflowCall(t, ctx, workflowTool(t, tools, "update_finding_report"), map[string]any{"finding_id": f.NodeID, "evidence_version": summary.Version, "report": "## Local report\n\nVerified baseline and proof using saved evidence."}, false)
+	workflowCall(t, ctx, workflowTool(t, tools, "update_finding_report"), map[string]any{"finding_id": f.NodeID, "evidence_version": summary.Version, "report": "candidate cannot publish"}, true)
+	reportCtx := acceptedReportContext(t, s, f.FindingID)
+	workflowCall(t, reportCtx, workflowTool(t, tools, "update_finding_report"), map[string]any{"finding_id": f.NodeID, "evidence_version": summary.Version, "report": "## Local report\n\nVerified baseline and proof using saved evidence."}, false)
 	updated, err := pg.GetFinding(f.FindingID)
 	if err != nil || updated.ReportEvidenceVersion != summary.Version || updated.EvidenceVersion != summary.Version {
 		t.Fatal("report did not cover post-binding version", updated, err)

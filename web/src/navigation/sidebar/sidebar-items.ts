@@ -93,6 +93,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "approvals", title: "审批记录", url: "/system/intercept/approvals", icon: ClipboardList },
       { id: "logs", title: "日志", url: "/system/logs", icon: ScrollText },
       { id: "settings", title: "系统配置", url: "/system/settings", icon: Settings2 },
+      { id: "verification", title: "候选验收", url: "/system/verification", icon: ShieldAlert },
     ],
   },
 ];

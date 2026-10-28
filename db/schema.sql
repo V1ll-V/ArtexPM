@@ -580,7 +580,7 @@ CREATE TABLE IF NOT EXISTS task_archives (
     progress                   INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
     error                      TEXT NOT NULL DEFAULT '',
     warnings                   JSONB NOT NULL DEFAULT '[]',
-    format_version             INTEGER NOT NULL DEFAULT 2,
+    format_version             INTEGER NOT NULL DEFAULT 4,
     archive_path               TEXT NOT NULL DEFAULT '',
     sha256                     TEXT NOT NULL DEFAULT '',
     original_size              BIGINT NOT NULL DEFAULT 0,
@@ -600,7 +600,7 @@ CREATE TABLE IF NOT EXISTS task_archives (
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-ALTER TABLE task_archives ALTER COLUMN format_version SET DEFAULT 2;
+ALTER TABLE task_archives ALTER COLUMN format_version SET DEFAULT 4;
 CREATE INDEX IF NOT EXISTS idx_task_archives_state ON task_archives(state, requested_at, id);
 CREATE INDEX IF NOT EXISTS idx_task_archives_archived ON task_archives(archived_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_task_archives_sources ON task_archives USING GIN(source_task_ids);
@@ -1448,3 +1448,200 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- ============================================================================
+-- §K 验收闭环(V0/V1)
+-- 三个互不替代的维度:技术判定(technical_verdict)、处置状态(findings.status)、
+-- 证据绑定状态(evidence_version/finding_traffic_bindings)。本段所有语句幂等,
+-- 因为 schema.sql 在每次启动时都会被执行。
+-- ============================================================================
+
+-- ---- 任务运行代次与收尾(closing)时序 ----
+-- run_epoch 在真正进入新一轮执行/恢复时递增;收尾协调器与在途任务用它判断
+-- 自己是否仍属于当前运行,旧代次的提交必须被拒绝。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS run_epoch BIGINT NOT NULL DEFAULT 0;
+-- closing_* 是**非终态**:非空表示任务已进入收尾,不再派发/领取新工作。
+-- 不塞进 status,避免破坏既有终态语义(IsTerminal 只认 done/failed/timeout)。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS closing_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS closing_run_epoch BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS closing_since TIMESTAMPTZ;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS closing_basis TEXT NOT NULL DEFAULT '';
+
+-- ---- finding 的技术判定与主张 ----
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS technical_verdict TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS proposed_claim TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS proposed_detail JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS accepted_claim TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS accepted_detail JSONB NOT NULL DEFAULT '{}';
+-- 版本:input_revision 由"验收输入清单"内容变化驱动;verdict_revision 每次判定提交递增;
+-- human_revision 人工决定新增/修改/清除均递增(时间只用于审计,不用于并发或优先级判定)。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS input_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verdict_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS human_revision BIGINT NOT NULL DEFAULT 0;
+-- 判定所依据的输入/策略版本,用于判断"当前判定是否仍然适用"。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verdict_input_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verdict_policy_version TEXT NOT NULL DEFAULT '';
+-- 历史过渡来源标记:''=原生,'legacy_finding'=升级前已存在的记录。
+-- 与 technical_verdict 分开记录,避免 legacy_unverified 同时当来源与技术结论。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS legacy_source TEXT NOT NULL DEFAULT '';
+-- S3 追加验证:同一漏洞的再次验证挂到既有 finding_id;supersedes 只表达替代/纠正。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS supersedes_finding_id BIGINT;
+-- 报告提交守卫:报告所依据的输入/判定版本。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_input_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_verdict_revision BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_findings_task_verdict ON findings(task_id, technical_verdict);
+CREATE INDEX IF NOT EXISTS idx_findings_verdict ON findings(technical_verdict) WHERE technical_verdict = 'supported';
+
+-- ---- 主张修订历史(候选提交、S3 追加验证、人工改写) ----
+CREATE TABLE IF NOT EXISTS finding_claims (
+    id             BIGSERIAL PRIMARY KEY,
+    finding_id     BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    revision       BIGINT NOT NULL,
+    kind           TEXT   NOT NULL,              -- candidate | append_verification | human_edit
+    claim          TEXT   NOT NULL DEFAULT '',
+    detail         JSONB  NOT NULL DEFAULT '{}',
+    evidence_refs  JSONB  NOT NULL DEFAULT '[]',
+    input_revision BIGINT NOT NULL DEFAULT 0,
+    actor          TEXT   NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (finding_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_claims_finding ON finding_claims(finding_id, revision DESC);
+
+-- ---- 人工决定(可追溯来源;人工优先于任何自动判定) ----
+CREATE TABLE IF NOT EXISTS finding_human_decisions (
+    id           BIGSERIAL PRIMARY KEY,
+    finding_id   BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    human_revision BIGINT NOT NULL,
+    decision     TEXT   NOT NULL,                -- supported | refuted | clear
+    source       TEXT   NOT NULL,                -- api_status | review_decision | migration | legacy_status
+    note         TEXT   NOT NULL DEFAULT '',
+    actor        TEXT   NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (finding_id, human_revision)
+);
+
+-- ---- 验收任务(共享执行底座:finding 与 goal 共用领取/租约/重试/幂等) ----
+-- state: queued -> leased -> committed | failed | superseded
+-- lease_generation 是 fencing token:过期执行者即使返回也不能提交。
+CREATE TABLE IF NOT EXISTS verification_jobs (
+    id                BIGSERIAL PRIMARY KEY,
+    subject_kind      TEXT   NOT NULL,           -- finding | goal
+    subject_id        BIGINT NOT NULL,
+    idempotency_key   TEXT   NOT NULL,           -- subject+input+policy(+review_request)
+    review_request_id TEXT   NOT NULL DEFAULT '',-- 显式强制重审的独立代次
+    policy_version    TEXT   NOT NULL DEFAULT '',
+    input_revision    BIGINT NOT NULL DEFAULT 0,
+    state             TEXT   NOT NULL DEFAULT 'queued',
+    result            JSONB,
+    committed_verdict TEXT   NOT NULL DEFAULT '',
+    lease_until       TIMESTAMPTZ,
+    lease_generation  BIGINT NOT NULL DEFAULT 0,
+    attempts          INT    NOT NULL DEFAULT 0,
+    last_error        TEXT   NOT NULL DEFAULT '',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (subject_kind, subject_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_verification_jobs_due
+    ON verification_jobs(state, lease_until) WHERE state IN ('queued','leased');
+
+-- Frozen verification inputs. Legacy jobs without a manifest must be rebuilt
+-- or superseded, never treated as if they had evaluated the current input.
+ALTER TABLE verification_jobs ADD COLUMN IF NOT EXISTS input_manifest JSONB;
+ALTER TABLE verification_jobs ADD COLUMN IF NOT EXISTS input_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE verification_jobs ADD COLUMN IF NOT EXISTS request_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE verification_jobs ADD COLUMN IF NOT EXISTS execution_input JSONB;
+ALTER TABLE verification_jobs ADD COLUMN IF NOT EXISTS execution_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE verification_jobs ADD COLUMN IF NOT EXISTS attempt_log JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS evaluation_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS evaluation_input_hash TEXT NOT NULL DEFAULT '';
+
+-- ---- 可靠工作流事件(不使用水位线:水位线在跳过分支前推进会永久丢事件) ----
+-- 唯一消费者是"持久化扇出器":同一事务内创建各下游任务并确认事件。
+CREATE TABLE IF NOT EXISTS verdict_events (
+    id               BIGSERIAL PRIMARY KEY,
+    finding_id       BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    kind             TEXT   NOT NULL,            -- candidate_created | finding_supported | finding_refuted | finding_needs_review
+    finding_revision BIGINT NOT NULL,            -- 入队时的 verdict_revision
+    payload          JSONB  NOT NULL DEFAULT '{}',
+    processed_at     TIMESTAMPTZ,
+    attempts         INT    NOT NULL DEFAULT 0,
+    last_error       TEXT   NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (finding_id, kind, finding_revision)
+);
+CREATE INDEX IF NOT EXISTS idx_verdict_events_due
+    ON verdict_events(id) WHERE processed_at IS NULL;
+
+-- ---- 下游任务(每个消费者自己的幂等键与处理状态) ----
+CREATE TABLE IF NOT EXISTS event_jobs (
+    id              BIGSERIAL PRIMARY KEY,
+    job_kind        TEXT   NOT NULL,             -- report_run
+    dedup_key       TEXT   NOT NULL UNIQUE,
+    source_event_id BIGINT,
+    payload         JSONB  NOT NULL DEFAULT '{}',
+    state           TEXT   NOT NULL DEFAULT 'queued',
+    lease_until     TIMESTAMPTZ,
+    lease_generation BIGINT NOT NULL DEFAULT 0,
+    attempts        INT    NOT NULL DEFAULT 0,
+    last_error      TEXT   NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_event_jobs_due
+    ON event_jobs(state, lease_until) WHERE state IN ('queued','leased');
+
+-- Report jobs retain one frozen scope across retries. Each lease owns a
+-- durable execution; report persistence and job completion commit together.
+ALTER TABLE event_jobs ADD COLUMN IF NOT EXISTS report_snapshot JSONB;
+ALTER TABLE event_jobs ADD COLUMN IF NOT EXISTS report_snapshot_hash TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS report_runs (
+    id BIGSERIAL PRIMARY KEY,
+    job_id BIGINT NOT NULL REFERENCES event_jobs(id) ON DELETE CASCADE,
+    lease_generation BIGINT NOT NULL,
+    finding_id BIGINT NOT NULL,
+    snapshot JSONB NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'prepared',
+    execution_input JSONB,
+    execution_hash TEXT NOT NULL DEFAULT '',
+    raw_output TEXT NOT NULL DEFAULT '',
+    output_encoding TEXT NOT NULL DEFAULT 'utf-8',
+    output_truncated BOOLEAN NOT NULL DEFAULT false,
+    report_hash TEXT NOT NULL DEFAULT '',
+    report_text TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    UNIQUE(job_id,lease_generation)
+);
+CREATE INDEX IF NOT EXISTS idx_report_runs_finding ON report_runs(finding_id,id);
+ALTER TABLE report_runs ADD COLUMN IF NOT EXISTS report_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_human_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_policy_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_run_id BIGINT;
+
+-- ---- 历史过渡 ----
+-- 一次性回填是**数据迁移**而不是 DDL:它由 db.migrateLegacyFindingVerdicts 用
+-- settings 守卫执行一次。不能放在本文件里——本文件每次启动都会执行,无守卫的
+-- UPDATE 会把之后新建的记录一并误标为 legacy。
+
+-- Canonical semantic input manifest; display-only ordering is excluded.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS input_manifest_hash TEXT NOT NULL DEFAULT '';
+
+-- Code-owned configuration fingerprints. User edits do not update ownership.
+CREATE TABLE IF NOT EXISTS managed_config (
+    kind TEXT NOT NULL,
+    resource_key TEXT NOT NULL,
+    seed_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(kind,resource_key)
+);
+CREATE TABLE IF NOT EXISTS verification_config_migrations (
+    version TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    result JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

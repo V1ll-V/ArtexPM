@@ -489,6 +489,27 @@ export interface FindingAsset {
 }
 
 export interface Finding {
+  verdict_detail?: {
+    missing_evidence?: string[];
+    unsupported_claims?: string[];
+    rationale?: string;
+    severity_rationale?: string;
+  };
+  technical_verdict?: "unverified" | "supported" | "refuted" | "needs_review";
+  effective?: boolean;
+  verdict_stale?: boolean;
+  proposed_claim?: string;
+  accepted_claim?: string;
+  accepted_detail?: {
+    accepted_severity?: string;
+    severity?: string;
+    preconditions?: string[];
+    evidence_note?: string;
+    evidence?: string;
+  };
+  display_claim?: string;
+  display_severity?: Severity;
+  legacy_source?: string;
   traffic_count?: number;
   evidence_version?: number;
   report_evidence_version?: number;

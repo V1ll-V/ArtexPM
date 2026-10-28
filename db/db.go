@@ -282,6 +282,11 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
 	}
+	// V1 历史过渡:升级前已存在的 finding 标 legacy 来源,已判误报的转为可追溯的
+	// 人工否定。由 settings 守卫只跑一次(不能放进幂等的 schema.sql)。
+	if err := d.migrateLegacyFindingVerdicts(); err != nil {
+		return fmt.Errorf("migrate legacy finding verdicts: %w", err)
+	}
 	return nil
 }
 
