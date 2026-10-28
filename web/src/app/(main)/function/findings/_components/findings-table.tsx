@@ -148,7 +148,7 @@ export function FindingsTable({
 
   return (
     /* 固定列宽保证展开内容不撑开表格；窄屏只在表格内部横向滚动。 */
-    <Table className="min-w-[60rem] table-fixed">
+    <Table className="min-w-[76rem] table-fixed">
       <TableHeader>
         <TableRow>
           <TableHead className="w-8">
@@ -159,7 +159,7 @@ export function FindingsTable({
             />
           </TableHead>
           <TableHead className="w-8" />
-          <TableHead className="w-20">严重度</TableHead>
+          <TableHead className="w-40">验收 / 严重度</TableHead>
           <TableHead>漏洞名称</TableHead>
           <TableHead className="w-44">资产</TableHead>
           <TableHead className="w-28">状态</TableHead>
@@ -203,14 +203,16 @@ export function FindingsTable({
                   />
                 </TableCell>
                 <TableCell>
-                  <FindingVerdictBadge finding={f} />
-                  {f.effective && !f.display_severity ? (
-                    <Badge variant="outline">等级未独立确认</Badge>
-                  ) : (
-                    <StatusBadge domain="severity" value={f.display_severity || f.severity} dot />
-                  )}
+                  <div className="flex flex-col items-start gap-1">
+                    <FindingVerdictBadge finding={f} />
+                    {f.effective && !f.display_severity ? (
+                      <Badge variant="outline">等级未独立确认</Badge>
+                    ) : (
+                      <StatusBadge domain="severity" value={f.display_severity || f.severity} dot />
+                    )}
+                  </div>
                 </TableCell>
-                <TableCell className="max-w-md">
+                <TableCell className="overflow-hidden">
                   <div className="flex min-w-0 flex-col gap-0.5">
                     {f.finding_id ? (
                       <Link
