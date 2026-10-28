@@ -35,10 +35,17 @@ func (d *DB) SeedTool(key, desc string, schema, agents json.RawMessage) error {
 	if len(agents) == 0 {
 		agents = json.RawMessage("[]")
 	}
-	_, err := d.Exec(`
+	hash, err := ConfigFingerprint(ToolConfigContract{Description: desc, Schema: schema})
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`WITH inserted AS (
 INSERT INTO tools(key, system, description, schema, agents, enabled)
 VALUES ($1, true, $2, $3, $4, true)
-ON CONFLICT (key) DO NOTHING`, key, desc, schema, agents)
+ON CONFLICT (key) DO NOTHING RETURNING key)
+INSERT INTO managed_config(kind,resource_key,seed_key,fingerprint)
+SELECT 'tool',key,'builtin.tool:'||key,$5 FROM inserted
+ON CONFLICT(kind,resource_key) DO UPDATE SET seed_key=EXCLUDED.seed_key,fingerprint=EXCLUDED.fingerprint,updated_at=now()`, key, desc, schema, agents, hash)
 	return err
 }
 
@@ -80,14 +87,21 @@ func (d *DB) UpsertToolForce(key, desc string, schema, agents json.RawMessage) e
 	if len(agents) == 0 {
 		agents = json.RawMessage("[]")
 	}
-	_, err := d.Exec(`
+	hash, err := ConfigFingerprint(ToolConfigContract{Description: desc, Schema: schema})
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`WITH reset AS (
 INSERT INTO tools(key, system, description, schema, agents, enabled)
 VALUES ($1, true, $2, $3, $4, true)
 ON CONFLICT (key) DO UPDATE
   SET description = EXCLUDED.description,
       schema      = EXCLUDED.schema,
       agents      = EXCLUDED.agents,
-      enabled     = true`, key, desc, schema, agents)
+      enabled     = true RETURNING key)
+INSERT INTO managed_config(kind,resource_key,seed_key,fingerprint)
+SELECT 'tool',key,'builtin.tool:'||key,$5 FROM reset
+ON CONFLICT(kind,resource_key) DO UPDATE SET seed_key=EXCLUDED.seed_key,fingerprint=EXCLUDED.fingerprint,updated_at=now()`, key, desc, schema, agents, hash)
 	return err
 }
 

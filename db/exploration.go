@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -201,6 +202,17 @@ func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority
 		return 0, err
 	}
 	defer tx.Rollback()
+	if _, err = tx.Exec(`SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return 0, err
+	}
+	if kind == KindGoal {
+		err = revokeClosingForGoalEditTx(tx, s.expID)
+	} else {
+		err = lockExplorationTasksTx(tx, s.expID)
+	}
+	if err != nil {
+		return 0, err
+	}
 	var id int64
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
@@ -257,6 +269,13 @@ func (s *ExplorationStore) Anchor(nodeID, assetID int64) error {
 
 // Link adds a typed exploration edge (idempotent).
 func (s *ExplorationStore) Link(from int64, rel string, to int64) error {
+	if rel == RelProves {
+		return s.db.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+			_, err := tx.Exec(`INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id)
+			VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, s.expID, from, rel, to)
+			return err
+		})
+	}
 	_, err := s.db.Exec(`
 INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4)
 ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, rel, to)
@@ -266,8 +285,14 @@ ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, re
 // SetNodeState updates any node's state (never deletes). content_version bumps
 // so a folded member's state flip invalidates its digest's cached body (§5.3).
 func (s *ExplorationStore) SetNodeState(id int64, state string) error {
-	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
-	return err
+	return s.db.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		if err := lockExplorationTasksTx(tx, s.expID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL,
+		content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
+		return err
+	})
 }
 
 // UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
@@ -279,14 +304,20 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 		payload["vulnclass"] = vulnclass
 	}
 	raw, _ := json.Marshal(payload)
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("目标不存在")
-	}
-	return nil
+	return s.db.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		if err := revokeClosingForGoalEditTx(tx, s.expID); err != nil {
+			return err
+		}
+		res, err := tx.Exec(`UPDATE exploration_nodes SET payload=$1,content_version=content_version+1,
+		state='open',blocked_reason=NULL WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrGoalNotFound
+		}
+		return nil
+	})
 }
 
 // DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop
@@ -294,14 +325,22 @@ func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) e
 // CASCADE, so they go with it; activity.node_id is ON DELETE SET NULL. Returns an
 // error if no such goal exists in this exploration.
 func (s *ExplorationStore) DeleteGoal(id int64) error {
-	res, err := s.db.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, id, s.expID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("目标不存在")
-	}
-	return nil
+	return s.db.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		if err := revokeClosingForGoalEditTx(tx, s.expID); err != nil {
+			return err
+		}
+		res, err := tx.Exec(`DELETE FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, id, s.expID)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM verification_jobs WHERE subject_kind='goal' AND subject_id=$1`, id); err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrGoalNotFound
+		}
+		return nil
+	})
 }
 
 // SetIntentState updates an intent node's state.
@@ -438,6 +477,13 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 		return out, err
 	}
 	defer tx.Rollback()
+	// Cleanup can remove facts/proves edges used by a goal evaluation.
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return out, err
+	}
+	if err := lockExplorationTasksTx(tx, s.expID); err != nil {
+		return out, err
+	}
 
 	// 锁定意图行确认存在(幂等:已删则 not found)。状态不校验——真删除对任何状态成立,
 	// running 的 worker 由调用方先停。
@@ -574,6 +620,9 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 
 	// finding 节点删除前先删 findings 表行(否则留 node_id=NULL 的孤儿)。
 	for _, fid := range findingIDs {
+		if err := purgeFindingLifecycleTx(tx, `SELECT id FROM findings WHERE node_id=$1`, fid); err != nil {
+			return out, err
+		}
 		if _, err := tx.Exec(`DELETE FROM findings WHERE node_id=$1`, fid); err != nil {
 			return out, err
 		}

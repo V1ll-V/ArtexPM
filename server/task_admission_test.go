@@ -247,6 +247,13 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 	}
 
 	s := newAdmissionTestServer(m, nil)
+	// This case resumes existing worker loops. A cancelled root is now correctly
+	// rejected when allocating a new epoch; model the existing runtime explicitly
+	// and give its fresh deadline coordinator a live, locally cancelled lifetime.
+	resumeCtx, stopResume := context.WithCancel(context.Background())
+	s.ctx = resumeCtx
+	s.engine.started.Store(task.ID, true)
+	defer func() { stopResume(); s.engine.StopTask(task.ID) }()
 	s.engine.settling.Store(task.ID, true)
 	s.engine.deadline.Store(task.ID, oldClock.DeadlineAt)
 	s.engine.stamped.Store(task.ID, true)
@@ -278,8 +285,8 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 		t.Fatalf("persisted timeout revival clock/config mismatch: %+v", stored)
 	}
 
-	// Release the only slot and promote the revived task. The test server uses a
-	// cancelled root context so no real Agent call races these state assertions.
+	// Release the only slot and promote the revived task. No planner/worker loops
+	// are launched by this fixture; the fresh timer waits for first-run stamping.
 	s.engine.Pause(holder.ID, agent.AbortPausedByUser)
 	if err := m.ApplyTaskPause(holder.ID); err != nil {
 		t.Fatal(err)
@@ -420,6 +427,9 @@ func TestUnavailableTaskReleasesSlotForReadyQueue(t *testing.T) {
 	}()
 	s := newAdmissionTestServer(m, func(task *Task) bool { return task.ID != unavailable.ID })
 	s.engine.started.Store(unavailable.ID, true)
+	// Model a parked, already-admitted runtime. The cancelled test root must
+	// not be used to allocate a fresh runtime generation (covered separately).
+	s.engine.started.Store(ready.ID, true)
 	if err := m.EnqueueTask(ready.ID, "resume"); err != nil {
 		t.Fatal(err)
 	}
@@ -461,6 +471,9 @@ func TestUnavailableTaskWaitsForActiveLLMCallBeforeParking(t *testing.T) {
 	available := map[string]bool{active.ID: true, waiting.ID: true}
 	s := newAdmissionTestServer(m, func(task *Task) bool { return available[task.ID] })
 	s.engine.started.Store(active.ID, true)
+	// The queued runtime already exists; this case tests slot release/resume,
+	// not starting new goroutines under the helper's cancelled root context.
+	s.engine.started.Store(waiting.ID, true)
 	if err := m.EnqueueTask(waiting.ID, "resume"); err != nil {
 		t.Fatal(err)
 	}

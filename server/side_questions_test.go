@@ -476,6 +476,12 @@ func TestSideTaskDrainPersistsBeforeArchive(t *testing.T) {
 	if err != nil || row == nil || row.Status != "cancelled" || row.Answer != "partial answer" || row.Usage.InputTokens != 19 {
 		t.Fatalf("drain returned before final persistence: %+v %v", row, err)
 	}
+	if err = f.m.pg.SetPaused(id, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.m.pg.QueueTaskArchive(id); err != nil {
+		t.Fatal(err)
+	}
 	archive, err := f.m.pg.SnapshotTaskArchive(id)
 	if err != nil {
 		t.Fatal(err)

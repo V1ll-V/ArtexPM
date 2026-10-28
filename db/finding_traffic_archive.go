@@ -75,6 +75,11 @@ func normalizeArchivedFindingVersions(raw json.RawMessage) (json.RawMessage, err
 		return nil, err
 	}
 	for _, row := range rows {
+		// Old archives have no semantic manifest. The next evidence update
+		// establishes a fresh input rather than reusing an unknown hash.
+		if row["input_manifest_hash"] == nil {
+			row["input_manifest_hash"] = ""
+		}
 		for _, key := range []string{"evidence_version", "report_evidence_version"} {
 			if row[key] == nil {
 				row[key] = 0

@@ -741,30 +741,36 @@ func (d *DB) CurrentPrompt(agentID int64) (string, error) {
 // SeedTool's first-insert-only philosophy: a user's edited prompt is never
 // clobbered on restart. Idempotent — a no-op once any version exists.
 func (d *DB) SeedPromptIfEmpty(agentID int64, tmpl string) error {
-	var cur sql.NullInt64
-	if err := d.QueryRow(`SELECT current_prompt_id FROM agents WHERE id=$1`, agentID).Scan(&cur); err != nil {
-		return err
-	}
-	if cur.Valid {
-		return nil // already seeded or user-edited → leave it
-	}
-	_, err := d.SavePrompt(agentID, tmpl, "内置默认", "system")
+	_, err := d.savePrompt(agentID, tmpl, "内置默认", "system", true, true)
 	return err
 }
 
 // ResetPromptToDefault appends the code-default template as a new version and
 // points current at it — the explicit "恢复为内置默认" action.
 func (d *DB) ResetPromptToDefault(agentID int64, tmpl string) (int, error) {
-	return d.SavePrompt(agentID, tmpl, "恢复为内置默认", "system")
+	return d.savePrompt(agentID, tmpl, "恢复为内置默认", "system", false, true)
 }
 
 // SavePrompt appends a new version and points current_prompt_id at it.
 func (d *DB) SavePrompt(agentID int64, template, note, by string) (int, error) {
+	return d.savePrompt(agentID, template, note, by, false, false)
+}
+
+func (d *DB) savePrompt(agentID int64, template, note, by string, onlyEmpty, managed bool) (int, error) {
 	tx, err := d.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+	// The active pointer and version allocation share the migration's row lock.
+	var current sql.NullInt64
+	var builtin bool
+	if err := tx.QueryRow(`SELECT current_prompt_id,builtin FROM agents WHERE id=$1 FOR UPDATE`, agentID).Scan(&current, &builtin); err != nil {
+		return 0, err
+	}
+	if onlyEmpty && current.Valid {
+		return 0, nil
+	}
 	var ver int
 	if err := tx.QueryRow(`SELECT COALESCE(max(version),0)+1 FROM agent_prompts WHERE agent_id=$1`, agentID).Scan(&ver); err != nil {
 		return 0, err
@@ -776,6 +782,15 @@ func (d *DB) SavePrompt(agentID int64, template, note, by string) (int, error) {
 	}
 	if _, err := tx.Exec(`UPDATE agents SET current_prompt_id=$1 WHERE id=$2`, pid, agentID); err != nil {
 		return 0, err
+	}
+	if managed && builtin {
+		hash, e := ConfigFingerprint(template)
+		if e != nil {
+			return 0, e
+		}
+		if e = recordManagedConfigTx(tx, "prompt", fmt.Sprint(agentID), hash); e != nil {
+			return 0, e
+		}
 	}
 	return ver, tx.Commit()
 }
@@ -815,7 +830,7 @@ type MCPServer struct {
 	Env       json.RawMessage `json:"env"`
 	URL       string          `json:"url,omitempty"`
 	Enabled   bool            `json:"enabled"`
-	Insecure  bool            `json:"insecure"` // http: skip TLS cert verification (self-signed servers, issue #108)
+	Insecure  bool            `json:"insecure"`        // http: skip TLS cert verification (self-signed servers, issue #108)
 	Tools     []string        `json:"tools,omitempty"` // cached tool names (mcp_tools_cache)
 }
 

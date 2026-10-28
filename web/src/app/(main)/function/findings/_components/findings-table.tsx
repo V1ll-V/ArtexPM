@@ -17,6 +17,7 @@ import {
 
 import { CopyButton } from "@/components/copy-button";
 import { Markdown } from "@/components/markdown";
+import { FindingVerdictBadge, FindingVerdictScope } from "@/components/finding-verdict";
 import { StatusBadge } from "@/components/status-badge";
 import {
   AlertDialog,
@@ -64,7 +65,7 @@ export interface FindingEdit {
   severity: Severity;
 }
 
-export type FindingReport = { status: "loading" | "done" | "error"; text: string };
+export type FindingReport = { status: "loading" | "done" | "error"; text: string; finding?: Finding };
 
 // Exploration node ids are only unique inside a task. Prefer the persisted
 // finding id and otherwise namespace the node id by task so editing one group
@@ -202,7 +203,12 @@ export function FindingsTable({
                   />
                 </TableCell>
                 <TableCell>
-                  <StatusBadge domain="severity" value={f.severity} dot />
+                  <FindingVerdictBadge finding={f} />
+                  {f.effective && !f.display_severity ? (
+                    <Badge variant="outline">等级未独立确认</Badge>
+                  ) : (
+                    <StatusBadge domain="severity" value={f.display_severity || f.severity} dot />
+                  )}
                 </TableCell>
                 <TableCell className="max-w-md">
                   <div className="flex min-w-0 flex-col gap-0.5">
@@ -218,7 +224,7 @@ export function FindingsTable({
                     ) : (
                       <span className="truncate font-medium">{f.name || f.vulnclass || "未分类"}</span>
                     )}
-                    <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
+                    <span className="truncate text-xs text-muted-foreground">{f.display_claim || f.summary}</span>
                     <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
                   </div>
                 </TableCell>
@@ -356,6 +362,7 @@ export function FindingsTable({
                       被强制单行、直接溢出单元格。 */}
                   <TableCell colSpan={COLUMN_COUNT} className="bg-muted/30 whitespace-normal">
                     <div className="flex flex-col gap-2 px-2 py-1">
+                      <FindingVerdictScope finding={reports[rowKey]?.finding || f} />
                       {/* 行内编辑:名称/类别/严重等级,可改并保存(仅独立 finding 行)。 */}
                       {f.finding_id && edit && (
                         <div className="flex flex-wrap items-end gap-3 rounded-md border bg-background px-3 py-2.5">
@@ -453,6 +460,11 @@ export function FindingsTable({
                               // whitespace-pre-wrap 让代码块也换行——否则长代码行/长 URL
                               // 会撑宽 colSpan 单元格,把整张表挤出横向滚动条。
                               <div className="min-w-0 break-words rounded-md border bg-background px-3 py-2 [&_pre]:whitespace-pre-wrap">
+                                {rep.finding?.report_stale || f.report_stale ? (
+                                  <p className="mb-2 text-sm font-medium">
+                                    历史报告已失效，仅供追溯，不能作为当前确认结论。
+                                  </p>
+                                ) : null}
                                 <Markdown text={rep.text} />
                               </div>
                             );

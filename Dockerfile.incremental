@@ -1,0 +1,12 @@
+# Reuse a trusted local runtime; compile dist/<arch>/artex with embedui first.
+ARG ARTEX_BASE_IMAGE=autumn27/artex:local
+FROM ${ARTEX_BASE_IMAGE}
+ARG TARGETARCH=amd64
+# Clear inherited runtime credentials; deployment supplies them through Compose.
+ENV OPENAI_API_KEY="" ANTHROPIC_API_KEY="" ARTEX_LLM_PROVIDER="" ARTEX_LLM_MODEL="" ARTEX_LLM_BASE_URL="" ARTEX_LLM_PROXY=""
+COPY dist/${TARGETARCH}/artex /app/artex
+COPY start.sh /app/start.sh
+COPY skills/ /app/skills/
+RUN rm -f /app/config.json /app/jwt.key /app/artex.upgrade.json /app/artex.new /app/artex.old /app/artex.failed && chmod +x /app/artex /app/start.sh
+ENTRYPOINT ["/app/start.sh"]
+CMD ["-addr", ":8787", "-proxy", ":8788"]

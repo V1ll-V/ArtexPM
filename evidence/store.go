@@ -104,15 +104,7 @@ func (s *Store) writeBody(r io.Reader, expectedLength int64, expectedHash string
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return "", err
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return "", err
-	}
-	defer d.Close()
-	return hash, d.Sync()
+	return hash, installBodyFile(f.Name(), path)
 }
 
 // StageFindingsExport freezes bindings/report versions and makes private body
@@ -121,6 +113,9 @@ func (s *Store) StageFindingsExport(ctx context.Context, findings []*db.DBFindin
 	return s.DB.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
 		var snapshots []db.TrafficEvidenceSnapshot
 		for _, f := range findings {
+			if err := db.RefreshFindingLifecycleTx(tx, f); err != nil {
+				return err
+			}
 			list, err := db.FindingTrafficTx(tx, f.ID)
 			if err != nil {
 				return err
@@ -129,7 +124,12 @@ func (s *Store) StageFindingsExport(ctx context.Context, findings []*db.DBFindin
 			f.TrafficCount = len(list.Bindings)
 			f.EvidenceVersion = list.Version
 			f.ReportEvidenceVersion = list.ReportVersion
-			if err = tx.QueryRow(`SELECT report FROM findings WHERE id=$1`, f.ID).Scan(&f.Report); err != nil {
+			// The selection may predate a human decision or an S3 edit. Freeze
+			// source fields under the same barrier as verdict/report and bodies.
+			if err = tx.QueryRow(`SELECT report,COALESCE(name,''),vulnclass,severity,summary,evidence,status,task_id,node_id,
+ COALESCE(review_decision,''),COALESCE(review_note,''),review_run_id,reviewed_at FROM findings WHERE id=$1`, f.ID).
+				Scan(&f.Report, &f.Name, &f.VulnClass, &f.Severity, &f.Summary, &f.Evidence, &f.Status, &f.TaskID, &f.NodeID,
+					&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt); err != nil {
 				return err
 			}
 			for _, b := range list.Bindings {

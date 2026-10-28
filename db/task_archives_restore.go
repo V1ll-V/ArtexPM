@@ -24,6 +24,9 @@ func (d *DB) CompleteTaskArchive(
 	if snapshot == nil || snapshot.FormatVersion != TaskArchiveFormatVersion {
 		return ErrTaskArchiveFormatMismatch
 	}
+	if err := validateLifecycleArchive(snapshot); err != nil {
+		return err
+	}
 	countsRaw, err := json.Marshal(snapshot.DataCounts)
 	if err != nil {
 		return err
@@ -49,6 +52,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	if state != Archiving || taskID != snapshot.TaskID || expID != snapshot.ExplorationID {
 		return fmt.Errorf("%w: archive snapshot identity/state mismatch", ErrTaskArchiveState)
+	}
+	if err := verifyFrozenLifecycleTx(tx, snapshot); err != nil {
+		return err
 	}
 	var dependent int64
 	err = tx.QueryRow(`SELECT child.id FROM task_relations relation
@@ -79,6 +85,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		}
 	}
 	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
+	if err := retireTaskLifecycleTx(tx, taskID, true); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
@@ -122,7 +131,8 @@ AND NOT EXISTS (
  name='',category_id=NULL,description='',goal='',paused=true,queued=false,queued_at=NULL,queue_mode='',
  llm_profile_id=NULL,active_llm_profile_id=NULL,llm_chain_revision=llm_chain_revision+1,
  company_id=NULL,parent_ref=NULL,timeout_seconds=0,coverage_enabled=true,pinned_at=NULL,
- first_run_at=NULL,deadline_at=NULL,archived_at=now(),deleted_at=now()
+ first_run_at=NULL,deadline_at=NULL,archived_at=now(),deleted_at=now(),run_epoch=run_epoch+1,
+ closing_reason='',closing_run_epoch=0,closing_since=NULL,closing_basis=''
 WHERE id=$1`, taskID); err != nil {
 		return err
 	}
@@ -176,6 +186,9 @@ func (d *DB) restoreTaskArchive(
 	if streamedLLMRecords != "" && llmRecords == nil {
 		return nil, fmt.Errorf("%w: streamed LLM records are missing", ErrTaskArchiveFormatMismatch)
 	}
+	if err := validateLifecycleArchive(snapshot); err != nil {
+		return nil, err
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -193,6 +206,21 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	if state != Restoring || taskID != snapshot.TaskID || expID != snapshot.ExplorationID {
 		return nil, fmt.Errorf("%w: restore snapshot identity/state mismatch", ErrTaskArchiveState)
+	}
+	var alreadyRestored bool
+	if err := tx.QueryRow(`SELECT deleted_at IS NULL AND archived_at IS NULL FROM tasks WHERE id=$1`, taskID).Scan(&alreadyRestored); err != nil {
+		return nil, err
+	}
+	if alreadyRestored {
+		var raw []byte
+		if err := tx.QueryRow(`SELECT warnings FROM task_archives WHERE id=$1`, archiveID).Scan(&raw); err != nil {
+			return nil, err
+		}
+		var warnings []string
+		if err := json.Unmarshal(raw, &warnings); err != nil {
+			return nil, err
+		}
+		return warnings, nil
 	}
 	warnings := []string{}
 	assetMap, assetWarnings, err := restoreArchiveAssets(tx, taskID, snapshot.Tables["assets"])
@@ -240,6 +268,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	if err != nil {
 		return nil, err
 	}
+	if err = normalizeLifecycleArchiveTables(remappedTables, snapshot.FormatVersion); err != nil {
+		return nil, err
+	}
 	// Insert graph rows in foreign-key order. The archived stub has no graph rows,
 	// so an ID conflict signals external corruption and must stop the restore.
 	for _, table := range []string{"exploration_nodes", "exploration_edges", "exploration_anchors", "task_constraints", "activity"} {
@@ -274,6 +305,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
 		return nil, fmt.Errorf("restore finding traffic: %w", err)
+	}
+	if err := restoreLifecycleArchiveTx(tx, snapshot, remappedTables); err != nil {
+		return nil, err
 	}
 	if streamedLLMRecords != "" {
 		count, err := insertArchiveJSONSequenceRows(tx, "llm_records", llmRecords)
@@ -325,6 +359,8 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,
+ run_epoch=GREATEST(current.run_epoch,COALESCE(archived.run_epoch,0))+1,
+ closing_reason='',closing_run_epoch=0,closing_since=NULL,closing_basis='',
  created_at=archived.created_at,updated_at=archived.updated_at
 FROM json_populate_record(NULL::tasks,$2::json) archived
 WHERE current.id=$1 AND archived.id=$1`, taskID, string(raw), remaining)
@@ -389,6 +425,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
+		"finding_claims": true, "finding_human_decisions": true, "finding_retests": true, "verification_jobs": true, "verdict_events": true, "event_jobs": true, "report_runs": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)
@@ -720,16 +757,29 @@ func nilIfEmptyString(value string) any {
 // CompleteTaskArchiveRestore removes compact metadata after every external
 // component has been verified and the package has been consumed.
 func (d *DB) CompleteTaskArchiveRestore(archiveID int64) error {
-	res, err := d.Exec(`DELETE FROM task_archives archive USING tasks task
-WHERE archive.id=$1 AND archive.task_id=task.id AND task.deleted_at IS NULL AND task.archived_at IS NULL`, archiveID)
+	// The evidence installer may already own the advisory lock on a different
+	// connection. The durable archive barrier plus task lock fence this commit.
+	tx, err := d.Begin()
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
+	defer tx.Rollback()
+	var taskID int64
+	err = tx.QueryRow(`SELECT t.id FROM tasks t JOIN task_archives a ON a.task_id=t.id WHERE a.id=$1
+ AND a.state IN ('restoring','restore_failed') AND t.deleted_at IS NULL AND t.archived_at IS NULL FOR UPDATE OF t,a`, archiveID).Scan(&taskID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTaskArchiveState
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+	if err = thawTaskLifecycleTx(tx, taskID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM task_archives WHERE id=$1`, archiveID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteTaskArchiveStub permanently removes the cold task after its package has

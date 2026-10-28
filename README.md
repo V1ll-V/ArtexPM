@@ -1,6 +1,6 @@
 <div align="center">
 
-# ARTEX · ArtexPM
+# ARTEX++ v0.4 · ArtexPM
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
@@ -20,14 +20,40 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
   2. Dockerfile 去掉 `# syntax=docker/dockerfile:1`，避免网络受限时 `docker build` 卡在 Docker Hub 前端镜像拉取；`TARGETARCH` 默认 `amd64`。
   3. README 按本分支的构建/升级方式调整；人工复核说明见下文。
   4. `install.sh` / `update.sh` 的 Docker 模式改为**本地构建镜像**；只有显式把 tag 改成非 `local` 时才会拉取上游镜像（且会二次确认）。
+  5. 新增完整的**候选验收与可靠报告流程**，配套有界任务收尾、人工决定保护和统一启用检查，详见下方更新说明。
 - **不要使用上游的「页面一键更新 / 预编译 Releases / `docker compose pull`」**：它们会拉取上游官方二进制，覆盖本分支的改动。本分支请用下方「快速开始（本分支）」的本地构建流程。
 - 开源协议仍为 **AGPL-3.0**；二次开发、分发与网络提供服务时需遵守原协议。
 
 ---
 
+## v0.4 更新：候选验收与报告流程（2026-10-28）
+
+界面名称现为 **ARTEX++ v0.4**，原登录用户名 `ARTEX` 和已有数据保持兼容。本次更新完善了漏洞发现、证据验收和报告交付流程，减少未经充分验证的结论进入正式报告，并让后续验证更有依据。
+
+- **漏洞发现先登记、再验收**：新发现先保存为候选，经过独立验收后，才能作为确认漏洞生成正式报告或用于判断任务完成。
+- **验收意见帮助继续验证**：缺失的证据、尚未获得支持的主张会反馈给任务规划者，便于继续补充对照、核实影响范围，而不是停留在初步现象上。
+- **报告更清楚地说明成立条件**：报告以验收支持的范围、前提和等级为依据；没有独立确认等级时明确标注，减少将候选的高危判断直接当成最终结论。
+- **人工复核持续生效**：人工确认或否定后，自动验收不会覆盖人工决定，只有人工主动清除后才交回自动判断。复核结论与处理状态分别保留，避免将“已忽略”“已处理”等状态误当成真实性判断。
+- **补充证据后重新检查结论**：证据或主张发生变化时，原结论会重新接受有效性检查，对应的旧报告会标为失效，避免继续引用已经不适用的结论。
+- **重复验证集中在同一条发现中**：可以向已有发现追加验证和证据，减少重复登记；重复提交相同材料不会反复触发验收，也支持对已保存证据重新发起验收。
+- **任务结束时更完整地保存成果**：目标达成后停止分派新工作，为正在执行的工作保留有限的收尾时间，减少结果遗漏；收尾不会延长原定截止时间。
+- **中断后更可靠地接续处理**：服务恢复后可继续处理待办验收和报告，降低遗漏、重复生成以及旧执行覆盖新结果的风险。
+- **列表、详情和导出的结论保持一致**：候选、有效确认、已否定和已过期的结论有清晰标识；导出保留验收范围、适用前提及历史报告状态，任务汇总区分有效确认与其他发现。
+- **归档保留完整复核历史**：归档与恢复保留候选主张、人工意见、验收记录和报告历史；旧版本历史记录仍可查看，但不会直接视为通过了新流程验收。
+- **新增统一启用入口**：在“系统 → 候选验收”查看运行检查、配置待处理项和验收／报告队列状态。功能默认关闭，检查通过后统一启用；停用会阻止后续自主规划、验收和报告领取，已开始的执行仍受版本校验约束。
+- **改善兼容性与升级体验**：修复 Windows 下 HTTP 证据保存失败、部分文件路径兼容问题，并补全任务规划中的企业关联范围信息。升级时保留自定义配置，对需要核对的内容明确提示。
+
+升级时请使用同一版本的前后端，进入“系统 → 候选验收”完成检查后再启用。建议先在已授权的小范围任务中核对结论和报告，再扩大使用范围。独立验收有助于减少误报，但不能保证发现一定真实，也不能保证覆盖所有漏洞。
+
+---
+
 ## 截图预览
 
-> 界面示意（截自上游版本）；本分支新增的「人工复核」入口见下文说明。
+> 以下多数界面示意截自上游版本；候选验收检查页为本分支隔离部署测试的实际截图。
+
+**候选验收与任务收尾：启用检查（隔离测试实例）**
+
+![候选验收与任务收尾启用检查](screenshots/verification-lifecycle.png)
 
 | 仪表盘（总览 / Token 消耗 / 活动流） | 任务列表 |
 | :---: | :---: |
@@ -127,22 +153,53 @@ docker compose up -d
 ```
 
 - 数据库迁移在 `artex` 启动时幂等执行；升级前建议备份 PostgreSQL 与 `./data`。
+- 候选验收与任务收尾流程默认关闭。配置模型后，进入“系统 → 候选验收”，处理页面列出的待复核配置，检查通过后点击“启用联动流程”。
 - `docker build` 需要能访问 Debian / NodeSource / Playwright 的下载源。网络受限时，可以给构建传代理：
   `docker build --build-arg HTTP_PROXY=http://host.docker.internal:7890 --build-arg HTTPS_PROXY=http://host.docker.internal:7890 -t autumn27/artex:local .`
 
-### 网络受限时的增量更新（只换程序）
+### 将 v0.4 替换到已有 Docker 业务环境
 
-如果镜像已经存在，只是换了二进制，可以跳过 apt/npm 层，直接替换镜像里的 `/app/artex`：
+升级使用原来的 Compose 项目、`.env`、`pgdata` 卷以及 `./data`、`./skills`。**不要删除数据库卷，也不要使用 `docker compose down -v`。** 更改项目名称或另开目录会连到另一套数据。
 
-```bash
-docker create --name artex-new autumn27/artex:local
-docker cp dist/amd64/artex artex-new:/app/artex
-docker commit artex-new autumn27/artex:local
-docker rm artex-new
-docker compose up -d artex
+1. 先按上面的步骤构建最新前端与内嵌二进制，编译时加 `-ldflags '-X main.version=v0.4.0'`，然后构建 `autumn27/artex:v0.4.0`。本地 tag 不表示已发布 Docker Hub 镜像，勿执行 `pull`。
+2. 确认没有任务正在执行后，停止应用、备份数据库、数据目录和 `.env`，保留旧镜像。以下为本项目的 PowerShell 示例，其他安装需把项目名改为自己原来的名称：
+
+```powershell
+$backupDir = Join-Path $HOME ('artex-backups/' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+docker tag autumn27/artex:local autumn27/artex:pre-v040
+# 停止应用后再做一致性备份，数据库保持运行。
+docker compose -p artex_last_version-main stop -t 120 artex
+docker compose -p artex_last_version-main exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/before-v040.dump'
+if ($LASTEXITCODE -ne 0) { throw '数据库备份失败，停止升级' }
+docker cp artex_last_version-main-postgres-1:/tmp/before-v040.dump "$backupDir/database.dump"
+Copy-Item -LiteralPath .env -Destination "$backupDir/.env"
+Copy-Item -LiteralPath ./data -Destination "$backupDir/data" -Recurse
+Copy-Item -LiteralPath ./skills -Destination "$backupDir/skills" -Recurse
+docker cp artex_last_version-main-artex-1:/app/jwt.key "$backupDir/jwt.key"
 ```
 
-> 这种方式只适合本地快速验证；可复现的正式构建仍建议用 `docker build`。
+3. 将原 `.env` 中的 `ARTEX_TAG` 改为 `v0.4.0`，其他密码和模型配置保持原值。只重建应用：
+
+```powershell
+docker compose -p artex_last_version-main up -d --no-deps --pull never artex
+Invoke-RestMethod http://localhost:8787/api/health
+```
+
+4. 打开 [控制台](http://localhost:8787)，应看到 **ARTEX++ v0.4**。使用原密码登录，检查原任务和发现，再进入“系统 → 候选验收”。默认关闭；处理页面提示的配置复核项、检查通过后再启用。重建容器可能需要重新登录，用户名仍为 `ARTEX`。
+
+备份含密码、签名密钥及业务证据，请保存在仓库之外。升级后的数据库不能保证兼容旧程序，**回退需同时恢复升级前的数据库与 `data` 快照，并恢复旧 `.env`、旧镜像；仅切换镜像不算完整回退**。先停应用，在独立库验证恢复备份后再切回，保留当前数据另作快照。
+
+### 网络受限时的本地增量构建
+
+已有包含运行依赖的本地镜像时，可复用其工具层，替换刚编译的程序和启动脚本；不会下载 apt/npm 依赖：
+
+```powershell
+docker tag autumn27/artex:local autumn27/artex:pre-v040
+docker build -f Dockerfile.incremental --build-arg ARTEX_BASE_IMAGE=autumn27/artex:pre-v040 -t autumn27/artex:v0.4.0 .
+```
+
+必须先完成前端导出和 Linux `embedui` 二进制编译。该方式不更新旧镜像的系统依赖，完整环境更新仍使用主 `Dockerfile`。增量镜像仅供本地使用；上传源码到 Git 不会把镜像上传到镜像仓库。
 
 ---
 

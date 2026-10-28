@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 3
+	TaskArchiveFormatVersion       = 4
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -223,6 +223,9 @@ func (d *DB) QueueTaskArchive(taskID int64) (*TaskArchive, error) {
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return nil, err
+	}
 	var name, description, goal, status, categoryName string
 	var categoryID *int64
 	var paused, queued bool
@@ -307,6 +310,9 @@ VALUES ($1,$2,'queued',0,'','[]',$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
 	}
 	if item.State != ArchiveQueued && item.State != ArchiveFailed {
 		return nil, fmt.Errorf("%w: current state %s", ErrTaskArchiveState, item.State)
+	}
+	if err = freezeTaskLifecycleTx(tx, taskID); err != nil {
+		return nil, err
 	}
 	return item, tx.Commit()
 }
@@ -432,8 +438,33 @@ func (d *DB) FailTaskArchiveJob(id int64, activeState string, cause error) error
 	if cause != nil {
 		message = cause.Error()
 	}
-	_, err := d.Exec(`UPDATE task_archives SET state=$2,phase='failed',error=$3 WHERE id=$1`, id, failed, message)
-	return err
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var taskID int64
+	if err = tx.QueryRow(`SELECT task_id FROM task_archives WHERE id=$1`, id).Scan(&taskID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, taskID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`UPDATE task_archives SET state=$2,phase='failed',error=$3 WHERE id=$1 AND state=$4`, id, failed, message, activeState)
+	if err != nil {
+		return err
+	}
+	if n, e := result.RowsAffected(); e != nil {
+		return e
+	} else if n != 1 {
+		return ErrTaskArchiveState
+	}
+	if activeState == Archiving {
+		if err = thawTaskLifecycleTx(tx, taskID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func queryArchiveRows(q interface {
@@ -554,6 +585,20 @@ func (d *DB) SnapshotTaskArchiveWithLLMRecords(taskID int64, llmRecords io.Write
 }
 
 func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchiveSnapshot, error) {
+	// Also cover archive jobs queued by a previous binary before lifecycle
+	// suspension existed. Freeze before opening the repeatable-read snapshot.
+	if err := d.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		var ready bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_archives WHERE task_id=$1 AND state IN ('archive_queued','archiving')) FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, taskID).Scan(&ready); err != nil {
+			return err
+		}
+		if !ready {
+			return ErrTaskArchiveState
+		}
+		return freezeTaskLifecycleTx(tx, taskID)
+	}); err != nil {
+		return nil, err
+	}
 	tx, err := d.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return nil, err
@@ -587,6 +632,13 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},
 		{"task_scope", `SELECT * FROM task_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"findings", `SELECT * FROM findings WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"finding_claims", `SELECT * FROM finding_claims WHERE finding_id IN (` + taskFindingIDs + `) ORDER BY id`, []any{taskID}},
+		{"finding_human_decisions", `SELECT * FROM finding_human_decisions WHERE finding_id IN (` + taskFindingIDs + `) ORDER BY id`, []any{taskID}},
+		{"finding_retests", `SELECT * FROM finding_retests WHERE finding_id IN (` + taskFindingIDs + `) ORDER BY id`, []any{taskID}},
+		{"verification_jobs", `SELECT * FROM verification_jobs WHERE ` + taskVerificationScope + ` ORDER BY id`, []any{taskID}},
+		{"verdict_events", `SELECT * FROM verdict_events WHERE finding_id IN (` + taskFindingIDs + `) ORDER BY id`, []any{taskID}},
+		{"event_jobs", `SELECT * FROM event_jobs WHERE id IN (` + findingEventJobs(taskFindingIDs) + `) ORDER BY id`, []any{taskID}},
+		{"report_runs", `SELECT * FROM report_runs WHERE finding_id IN (` + taskFindingIDs + `) ORDER BY id`, []any{taskID}},
 		{"finding_traffic_bindings", `SELECT b.* FROM finding_traffic_bindings b JOIN findings f ON f.id=b.finding_id WHERE f.task_id=$1 ORDER BY b.finding_id,b.position,b.id`, []any{taskID}},
 		{"traffic_evidence_snapshots", `SELECT s.* FROM traffic_evidence_snapshots s WHERE EXISTS(SELECT 1 FROM finding_traffic_bindings b JOIN findings f ON f.id=b.finding_id WHERE b.snapshot_id=s.id AND f.task_id=$1) ORDER BY s.id`, []any{taskID}},
 		{"llm_records", `SELECT * FROM llm_records WHERE COALESCE(task_id,'')=$1 ORDER BY id`, []any{strconv.FormatInt(taskID, 10)}},

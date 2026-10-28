@@ -15,6 +15,7 @@ import (
 // DBFinding is a row in the standalone findings table. It persists across task
 // deletion unless the caller explicitly requests related finding cleanup.
 type DBFinding struct {
+	Lifecycle             FindingLifecycle
 	TrafficCount          int
 	EvidenceVersion       int64
 	ReportEvidenceVersion int64
@@ -120,11 +121,16 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 		nid = &nodeID
 	}
 	var id int64
-	err := d.QueryRow(
-		`INSERT INTO findings (task_id, node_id, vulnclass, name, severity, summary, evidence, worker, asset_ids)
+	err := d.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		if err := LockTaskEvidenceTx(tx, taskID); err != nil {
+			return err
+		}
+		return tx.QueryRow(
+			`INSERT INTO findings (task_id, node_id, vulnclass, name, severity, summary, evidence, worker, asset_ids)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-		tid, nid, vulnclass, name, severity, summary, evidence, worker, string(aidsJSON),
-	).Scan(&id)
+			tid, nid, vulnclass, name, severity, summary, evidence, worker, string(aidsJSON),
+		).Scan(&id)
+	})
 	return id, err
 }
 
@@ -134,7 +140,7 @@ const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.n
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
  (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),
-	 COALESCE(f.review_decision, ''), COALESCE(f.review_note, ''), f.review_run_id, f.reviewed_at`
+	 COALESCE(f.review_decision, ''), COALESCE(f.review_note, ''), f.review_run_id, f.reviewed_at, ` + findingLifecycleColumns
 
 // scanFindings materializes rows selected via findingSelectCols.
 func scanFindings(rows interface {
@@ -146,12 +152,16 @@ func scanFindings(rows interface {
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
+		var lifecycleJSON []byte
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount,
-			&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt); err != nil {
+			&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt, &lifecycleJSON); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		if err := json.Unmarshal(lifecycleJSON, &f.Lifecycle); err != nil {
+			return nil, err
+		}
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -539,13 +549,17 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
+		var lifecycleJSON []byte
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
 			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount,
-			&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt, &f.Report); err != nil {
+			&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt, &lifecycleJSON, &f.Report); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		if err := json.Unmarshal(lifecycleJSON, &f.Lifecycle); err != nil {
+			return nil, err
+		}
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -664,6 +678,7 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
+	var lifecycleJSON []byte
 	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
@@ -671,7 +686,7 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
 		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount,
-		&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt, &f.Report)
+		&f.ReviewDecision, &f.ReviewNote, &f.ReviewRunID, &f.ReviewedAt, &lifecycleJSON, &f.Report)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -679,6 +694,9 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	if err := json.Unmarshal(lifecycleJSON, &f.Lifecycle); err != nil {
+		return nil, err
+	}
 	return f, nil
 }
 
@@ -696,6 +714,9 @@ func (d *DB) DeleteFinding(id int64) (n int64, err error) {
 			return err
 		}
 		var nodeID sql.NullInt64
+		if err := purgeFindingLifecycleTx(tx, `SELECT $1::bigint AS id`, id); err != nil {
+			return err
+		}
 		if err := tx.QueryRow(`DELETE FROM findings WHERE id=$1 RETURNING node_id`, id).Scan(&nodeID); err != nil {
 			return err
 		}
@@ -714,11 +735,22 @@ func (d *DB) DeleteFinding(id int64) (n int64, err error) {
 // exploration finding nodes are cascade-deleted separately when the task's
 // exploration subgraph is dropped. Returns rows deleted.
 func (d *DB) DeleteFindingsByTask(taskID int64) (int64, error) {
-	res, err := d.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	var n int64
+	err := d.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		if err := LockTaskEvidenceTx(tx, taskID); err != nil {
+			return err
+		}
+		if err := purgeFindingLifecycleTx(tx, taskFindingIDs, taskID); err != nil {
+			return err
+		}
+		res, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
 }
 
 // SetFindingStatus updates one finding's triage state. Returns rows affected.
@@ -727,11 +759,14 @@ func (d *DB) DeleteFindingsByTask(taskID int64) (int64, error) {
 // SetFindingStatusWithNotify —— 直接调本函数会让「状态变更推送」静默失效。
 // 保留它是为了让不关心通知的用例（参数校验、复测流程）能单独驱动状态。
 func (d *DB) SetFindingStatus(id int64, status string) (int64, error) {
-	res, err := d.Exec(`UPDATE findings SET status=$1 WHERE id=$2`, status, id)
+	_, found, _, err := d.SetFindingStatusWithNotify(context.Background(), id, status)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	if found {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // SetFindingReviewDecision records the human decision on one finding. decision
@@ -751,6 +786,12 @@ func (d *DB) SetFindingReviewDecision(ctx context.Context, id int64, decision, n
 	if len([]rune(note)) > 8000 {
 		return false, errors.New("复核备注最多 8000 个字符")
 	}
+	if severity != nil && *severity != "" && !ValidSeverity(*severity) {
+		return false, errors.New("无效的严重等级")
+	}
+	if applyStatus != nil && *applyStatus != "" && !((decision == FindingReviewConfirmed && *applyStatus == FindingConfirmed) || (decision == FindingReviewFalsePositive && *applyStatus == FindingFalsePositive)) {
+		return false, errors.New("处置状态必须与人工复核结论一致")
+	}
 	if decision == FindingReviewNone {
 		// 清空判定时同时清掉备注与运行引用，避免留下一条「无结论但有备注」的脏记录。
 		note = ""
@@ -761,6 +802,17 @@ func (d *DB) SetFindingReviewDecision(ctx context.Context, id int64, decision, n
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Review may change a report's human/version guard. Use the same evidence
+	// barrier and task -> finding lock order as binding and report commits.
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, findingEvidenceLockKey); err != nil {
+		return false, err
+	}
+	if err = LockFindingEvidenceTx(tx, id, nil); err != nil {
+		if errors.Is(err, ErrFindingNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
 	var nodeID *int64
 	err = tx.QueryRowContext(ctx, `SELECT node_id FROM findings WHERE id=$1 FOR UPDATE`, id).Scan(&nodeID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -790,14 +842,28 @@ func (d *DB) SetFindingReviewDecision(ctx context.Context, id int64, decision, n
 			return false, err
 		}
 		if nodeID != nil {
-			_, _ = tx.ExecContext(ctx, `UPDATE exploration_nodes
-				SET payload = jsonb_set(payload, '{severity}', to_jsonb($1::text)) WHERE id=$2`, *severity, *nodeID)
+			if _, err = tx.ExecContext(ctx, `UPDATE exploration_nodes
+				SET payload = jsonb_set(payload, '{severity}', to_jsonb($1::text)) WHERE id=$2`, *severity, *nodeID); err != nil {
+				return false, err
+			}
 		}
 	}
 	if applyStatus != nil && *applyStatus != "" {
-		if _, _, _, _, err = SetFindingStatusTx(ctx, tx, id, *applyStatus); err != nil {
+		if _, _, _, _, err = SetFindingStatusTx(ctx, tx, id, *applyStatus, false); err != nil {
 			return false, err
 		}
+	}
+	human := HumanDecisionNeedsReview
+	switch decision {
+	case FindingReviewNone:
+		human = HumanDecisionClear
+	case FindingReviewConfirmed:
+		human = HumanDecisionSupported
+	case FindingReviewFalsePositive:
+		human = HumanDecisionRefuted
+	}
+	if _, err = RecordHumanDecisionTx(tx, id, human, "review_decision", note, "human"); err != nil {
+		return false, err
 	}
 	return found, tx.Commit()
 }
@@ -805,8 +871,24 @@ func (d *DB) SetFindingReviewDecision(ctx context.Context, id int64, decision, n
 // SetFindingReportByNodeID sets the Markdown report on the standalone finding row
 // whose node_id matches — report_finding returns that node id, so an agent tool
 // can address the finding it just created. Returns rows affected (0 when no row).
+// Deprecated: this context-free compatibility entry never grants report-write
+// authority. Use a persisted report execution bound with WithReportRun.
 func (d *DB) SetFindingReportByNodeID(nodeID int64, report string) (int64, error) {
 	return d.SetFindingReportVersionByNodeID(context.Background(), nodeID, report, nil)
+}
+
+// ErrVerdictNotSupported 表示目标漏洞当前没有**有效**的技术判定,因此不允许
+// 写入正式报告。候选记录可以存在、可以被查看、可以补证据,但不能产出正式报告。
+var ErrVerdictNotSupported = errors.New("该漏洞尚未通过验收(或判定已过期、已被人工否定),不能写入正式报告")
+
+// SetFindingReportGated validates a trusted frozen report execution, then saves
+// its report, authoritative versions and job completion in one transaction.
+//
+// 这解决两个问题:
+//   - 候选不能绕过验收产出正式报告(即使遗留触发器仍启动了 Reporter);
+//   - 迟到的 Reporter 不能用旧判定覆盖已经变化的新证据或人工决定。
+func (d *DB) SetFindingReportGated(ctx context.Context, nodeID int64, report string, trafficVersion *int64) (int64, error) {
+	return d.commitFindingReportBound(ctx, nodeID, report, trafficVersion)
 }
 
 // setFindingCol updates one text column on the standalone finding row AND mirrors
@@ -816,20 +898,27 @@ func (d *DB) SetFindingReportByNodeID(nodeID int64, report string) (int64, error
 // col and jsonKey MUST be trusted constants (they are interpolated into SQL) — never
 // pass user input.
 func (d *DB) setFindingCol(id int64, col, jsonKey, val string) (int64, error) {
-	var nodeID *int64
-	err := d.QueryRow(`UPDATE findings SET `+col+`=$1 WHERE id=$2 RETURNING node_id`, val, id).Scan(&nodeID)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	if nodeID != nil {
-		_, _ = d.Exec(`UPDATE exploration_nodes
-			SET payload = jsonb_set(payload, '{`+jsonKey+`}', to_jsonb($1::text))
-			WHERE id = $2`, val, *nodeID)
-	}
-	return 1, nil
+	var n int64
+	err := d.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
+		if err := LockFindingEvidenceTx(tx, id, nil); err != nil {
+			if errors.Is(err, ErrFindingNotFound) {
+				return nil
+			}
+			return err
+		}
+		var nodeID *int64
+		if err := tx.QueryRow(`UPDATE findings SET `+col+`=$1 WHERE id=$2 RETURNING node_id`, val, id).Scan(&nodeID); err != nil {
+			return err
+		}
+		if nodeID != nil {
+			if _, err := tx.Exec(`UPDATE exploration_nodes SET payload=jsonb_set(payload,'{`+jsonKey+`}',to_jsonb($1::text)) WHERE id=$2`, val, *nodeID); err != nil {
+				return err
+			}
+		}
+		n = 1
+		return nil
+	})
+	return n, err
 }
 
 // SetFindingSeverity updates one finding's severity (+ node payload sync). Returns
@@ -852,6 +941,7 @@ func (d *DB) SetFindingVulnClass(id int64, vulnclass string) (int64, error) {
 // FindingMeta is the standalone-row data (id, triage state, anchored assets) the
 // per-task view grafts onto its exploration-node findings.
 type FindingMeta struct {
+	Finding      *DBFinding
 	TrafficCount int
 
 	ID       int64
@@ -874,21 +964,18 @@ func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 	if taskID <= 0 {
 		return out, nil
 	}
-	rows, err := d.Query(`SELECT node_id, id, COALESCE(status,'pending'), asset_ids, (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=findings.id) FROM findings
-		WHERE task_id=$1 AND node_id IS NOT NULL`, taskID)
+	rows, err := d.Query(`SELECT `+findingSelectCols+` FROM findings f LEFT JOIN tasks t ON t.id=f.task_id
+		WHERE f.task_id=$1 AND f.node_id IS NOT NULL`, taskID)
 	if err != nil {
 		return out, err
 	}
 	defer rows.Close()
-	for rows.Next() {
-		var nid int64
-		var m FindingMeta
-		var aidsJSON string
-		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON, &m.TrafficCount); err != nil {
-			return out, err
-		}
-		_ = json.Unmarshal([]byte(aidsJSON), &m.AssetIDs)
-		out[nid] = m
+	findings, err := scanFindings(rows)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range findings {
+		out[*f.NodeID] = FindingMeta{Finding: f, ID: f.ID, Status: f.Status, AssetIDs: f.AssetIDs, TrafficCount: f.TrafficCount}
 	}
 	return out, rows.Err()
 }

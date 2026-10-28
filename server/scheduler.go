@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -23,6 +24,12 @@ type Scheduler struct {
 	s    *Server
 	pg   *db.DB
 	tick time.Duration
+	// verifyWG 跟踪在跑的验收 goroutine,便于测试与关停时等待。
+	verifyWG        sync.WaitGroup
+	verifySlots     chan struct{}
+	verificationCtx context.Context
+	reportWG        sync.WaitGroup
+	reportSlots     chan struct{}
 }
 
 const (
@@ -34,7 +41,7 @@ const (
 )
 
 func newScheduler(s *Server) *Scheduler {
-	return &Scheduler{s: s, pg: s.m.pg, tick: 5 * time.Second}
+	return &Scheduler{s: s, pg: s.m.pg, tick: 5 * time.Second, verifySlots: make(chan struct{}, verificationConcurrency)}
 }
 
 // Run loops until ctx is done, ticking the scheduler. Started once from server New.
@@ -42,6 +49,13 @@ func (sc *Scheduler) Run(ctx context.Context) {
 	if sc.pg == nil {
 		return
 	}
+	verificationCtx, cancelVerification := context.WithCancel(ctx)
+	sc.verificationCtx = verificationCtx
+	defer func() {
+		cancelVerification()
+		sc.verifyWG.Wait()
+		sc.reportWG.Wait()
+	}()
 	sc.init()
 	t := time.NewTicker(sc.tick)
 	defer t.Stop()
@@ -115,6 +129,10 @@ func (sc *Scheduler) init() {
 }
 
 func (sc *Scheduler) step() {
+	// V1 验收工作流:扇出事件 + 启动已通过验收的报告任务。它不依赖
+	// agent_triggers 是否存在,因此必须在下面的提前返回**之前**执行。
+	sc.fireVerdictWorkflow()
+
 	triggers, err := sc.pg.ListEnabledTriggers()
 	if err != nil {
 		return

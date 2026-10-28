@@ -203,6 +203,11 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(id) DO NOTHIN
 }
 
 func AddFindingTrafficTx(tx *sql.Tx, findingID int64, prepared []PreparedTrafficEvidence) error {
+	return addFindingTrafficTx(tx, findingID, prepared, true)
+}
+
+// S3 updates the claim and traffic together, then advances the input once.
+func addFindingTrafficTx(tx *sql.Tx, findingID int64, prepared []PreparedTrafficEvidence, refresh bool) error {
 	var position int
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(position)+1,0) FROM finding_traffic_bindings WHERE finding_id=$1`, findingID).Scan(&position); err != nil {
 		return err
@@ -216,7 +221,9 @@ func AddFindingTrafficTx(tx *sql.Tx, findingID int64, prepared []PreparedTraffic
 			return err
 		}
 		res, err := tx.Exec(`INSERT INTO finding_traffic_bindings(finding_id,snapshot_id,role,note,position)
-VALUES($1,$2,$3,$4,$5) ON CONFLICT(finding_id,snapshot_id) DO NOTHING`, findingID, item.Snapshot.ID, item.Ref.Role, item.Ref.Note, position)
+VALUES($1,$2,$3,$4,$5) ON CONFLICT(finding_id,snapshot_id) DO UPDATE
+SET role=EXCLUDED.role,note=EXCLUDED.note
+WHERE (finding_traffic_bindings.role,finding_traffic_bindings.note) IS DISTINCT FROM (EXCLUDED.role,EXCLUDED.note)`, findingID, item.Snapshot.ID, item.Ref.Role, item.Ref.Note, position)
 		if err != nil {
 			return err
 		}
@@ -230,13 +237,38 @@ VALUES($1,$2,$3,$4,$5) ON CONFLICT(finding_id,snapshot_id) DO NOTHING`, findingI
 		}
 	}
 	if changed {
+		if !refresh {
+			_, err := tx.Exec(`UPDATE findings SET evidence_version=evidence_version+1 WHERE id=$1`, findingID)
+			return err
+		}
 		return bumpEvidenceVersionTx(tx, findingID)
 	}
 	return nil
 }
 
 func bumpEvidenceVersionTx(tx *sql.Tx, findingID int64) error {
-	_, err := tx.Exec(`UPDATE findings SET evidence_version=evidence_version+1 WHERE id=$1`, findingID)
+	// 证据引用属于验收输入清单的一部分:绑定变化必须同时推进 input_revision,
+	// 否则旧判定会继续被当作"仍然适用"。
+	_, err := tx.Exec(`UPDATE findings
+SET evidence_version=evidence_version+1
+WHERE id=$1`, findingID)
+	if err != nil {
+		return err
+	}
+	var claim string
+	if err = tx.QueryRow(`SELECT proposed_claim FROM findings WHERE id=$1`, findingID).Scan(&claim); err != nil {
+		return err
+	}
+	if strings.TrimSpace(claim) == "" {
+		return nil
+	}
+	revision, changed, err := refreshFindingInputTx(tx, findingID, false)
+	if err != nil {
+		return err
+	}
+	if changed {
+		_, err = queueFindingInputTx(tx, findingID, revision, "")
+	}
 	return err
 }
 
@@ -281,6 +313,10 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 		if err := LockFindingEvidenceTx(tx, findingID, &version); err != nil {
 			return err
 		}
+		before, _, err := findingManifestTx(tx, findingID)
+		if err != nil {
+			return err
+		}
 		if order != nil {
 			current, err := FindingTrafficTx(tx, findingID)
 			if err != nil {
@@ -321,6 +357,13 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 				return ErrEvidenceNotFound
 			}
 		}
+		after, _, err := findingManifestTx(tx, findingID)
+		if err != nil {
+			return err
+		}
+		if before == after {
+			return nil
+		}
 		return bumpEvidenceVersionTx(tx, findingID)
 	})
 }
@@ -329,6 +372,191 @@ type RecordFindingInput struct {
 	TaskID, ExplorationID, IntentID                      int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
 	AssetIDs                                             []int64
+	// V1 验收闭环:
+	//   ExistingFindingID > 0 表示这是对既有漏洞的**追加验证**(S3),不新建 finding。
+	//   SupersedesFindingID 只表达替代/纠正关系,不代替追加验证。
+	ExistingFindingID   int64
+	SupersedesFindingID int64
+	Actor               string
+	// Preconditions 是主张成立所需的适用前提(进入验收输入清单)。
+	Preconditions []string
+	EvidenceNote  string
+}
+
+// proposalClaim 返回候选主张文本。主张必须是非空的:没有主张就没有可验收对象。
+func (in RecordFindingInput) proposalClaim() string {
+	if s := strings.TrimSpace(in.Summary); s != "" {
+		return s
+	}
+	return strings.TrimSpace(in.VulnClass + " " + in.Name)
+}
+
+// claimDetail 汇总迁移与验收都必须保留的主张要素。
+func (in RecordFindingInput) claimDetail() ClaimDetail {
+	return ClaimDetail{
+		VulnClass:     in.VulnClass,
+		Name:          in.Name,
+		Severity:      in.Severity,
+		Preconditions: in.Preconditions,
+		EvidenceNote:  in.EvidenceNote,
+		Evidence:      in.Evidence,
+	}
+}
+
+// recordClaimAndEnqueueTx 写入候选主张、验收任务与候选事件。
+//
+// 三者与 finding 主记录在**同一事务**内提交:验收任务是候选进入闭环的必经
+// 工作流,不是尽力投递的通知,任何一步失败都必须整笔回滚。
+func recordClaimAndEnqueueTx(tx *sql.Tx, findingID int64, in RecordFindingInput, claimKind string) (jobID int64, err error) {
+	claim := in.proposalClaim()
+	if claim == "" {
+		return 0, ErrFindingClaimEmpty
+	}
+	detail := normalizedClaimDetail(in.claimDetail())
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		return 0, err
+	}
+	var inputRev int64
+	if err := tx.QueryRow(`UPDATE findings SET proposed_claim=$2, proposed_detail=$3
+WHERE id=$1 RETURNING input_revision`, findingID, claim, string(raw)).Scan(&inputRev); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrFindingNotFound
+		}
+		return 0, err
+	}
+	inputRev, _, err = refreshFindingInputTx(tx, findingID, true)
+	if err != nil {
+		return 0, err
+	}
+	_, refs, err := findingManifestTx(tx, findingID)
+	if err != nil {
+		return 0, err
+	}
+	if err := insertClaimTx(tx, findingID, claimKind, claim, detail, refs, inputRev, in.Actor); err != nil {
+		return 0, err
+	}
+	jobID, err = queueFindingInputTx(tx, findingID, inputRev, "")
+	if err != nil {
+		return 0, err
+	}
+	if err := EnqueueVerdictEventTx(tx, findingID, EventCandidateCreated, inputRev, map[string]any{
+		"job_id":         jobID,
+		"input_revision": inputRev,
+	}); err != nil {
+		return 0, err
+	}
+	return jobID, nil
+}
+
+// appendVerificationTx 把一次 S3 追加验证挂到**既有 finding_id** 上。
+//
+// 它不新建 finding(避免 #45/#46 那种"复现一次多一条成果"),而是:追加主张
+// 修订、递增验收输入版本、重新入队验收。人工已作出决定时保持人工优先,
+// 不把技术判定改回未验证。
+func appendVerificationTx(tx *sql.Tx, in RecordFindingInput, existingID int64, prepared []PreparedTrafficEvidence) (*RecordedFinding, error) {
+	var nodeID int64
+	var humanRev int64
+	var ownerTask sql.NullInt64
+	var ownerExp int64
+	// 归属检查:引用既有 finding_id 不等于获得写入授权。必须核对这条 finding
+	// 实际属于哪个任务/探索——继承来的或无关任务的记录一律只读。
+	if err := tx.QueryRow(`SELECT COALESCE(f.node_id,0),f.human_revision,f.task_id,n.exploration_id
+FROM findings f LEFT JOIN exploration_nodes n ON n.id=f.node_id
+WHERE f.id=$1`, existingID).Scan(&nodeID, &humanRev, &ownerTask, &ownerExp); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrFindingNotFound
+		}
+		return nil, err
+	}
+	if in.TaskID > 0 {
+		var expID int64
+		if err := tx.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1`, in.TaskID).Scan(&expID); err != nil {
+			return nil, err
+		}
+		if expID != in.ExplorationID {
+			return nil, errors.New("漏洞所属任务与探索记录不匹配")
+		}
+		// 既有 finding 必须属于同一个任务;跨任务追加写入一律拒绝。
+		if !ownerTask.Valid || ownerTask.Int64 != in.TaskID {
+			return nil, errors.New("该漏洞不属于当前任务，不能追加验证（继承或无关任务的记录只读）")
+		}
+	} else if ownerExp != in.ExplorationID {
+		// 无任务上下文时至少要求同属一个探索。
+		return nil, errors.New("该漏洞不属于当前探索，不能追加验证")
+	}
+	claim := in.proposalClaim()
+	if claim == "" {
+		return nil, ErrFindingClaimEmpty
+	}
+	detail := normalizedClaimDetail(in.claimDetail())
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		return nil, err
+	}
+	if err := LockFindingEvidenceTx(tx, existingID, nil); err != nil {
+		return nil, err
+	}
+	// Freeze one semantic input after both claim and evidence have changed.
+	if err := addFindingTrafficTx(tx, existingID, prepared, false); err != nil {
+		return nil, err
+	}
+	var inputRev int64
+	if err := tx.QueryRow(`UPDATE findings SET
+       proposed_claim=CASE WHEN $2::text='' THEN proposed_claim ELSE $2::text END,
+       proposed_detail=CASE WHEN $3::jsonb='{}'::jsonb THEN proposed_detail ELSE $3::jsonb END,
+       supersedes_finding_id=CASE WHEN $4::bigint>0 THEN $4::bigint ELSE supersedes_finding_id END
+WHERE id=$1 RETURNING input_revision`, existingID, claim, string(raw), in.SupersedesFindingID).Scan(&inputRev); err != nil {
+		return nil, err
+	}
+	_, changed, err := refreshFindingInputTx(tx, existingID, false)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.QueryRow(`SELECT input_revision FROM findings WHERE id=$1`, existingID).Scan(&inputRev); err != nil {
+		return nil, err
+	}
+	// An identical retry must not append history or create a new verification job.
+	if !changed {
+		traffic, e := FindingTrafficTx(tx, existingID)
+		return &RecordedFinding{FindingID: existingID, NodeID: nodeID, Traffic: traffic}, e
+	}
+	_, refs, err := findingManifestTx(tx, existingID)
+	if err != nil {
+		return nil, err
+	}
+	// An empty detail means "keep previous detail"; audit the effective input.
+	if err = tx.QueryRow(`SELECT proposed_detail FROM findings WHERE id=$1`, existingID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	if err = json.Unmarshal(raw, &detail); err != nil {
+		return nil, err
+	}
+	// 新证据使自动判定过期;人工决定优先,不覆盖。
+	if humanRev == 0 {
+		if _, err := tx.Exec(`UPDATE findings SET technical_verdict=$2 WHERE id=$1 AND human_revision=0`, existingID, VerdictUnverified); err != nil {
+			return nil, err
+		}
+	}
+	if err := insertClaimTx(tx, existingID, "append_verification", claim, detail, refs, inputRev, in.Actor); err != nil {
+		return nil, err
+	}
+	jobID, err := queueFindingInputTx(tx, existingID, inputRev, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := EnqueueVerdictEventTx(tx, existingID, EventCandidateCreated, inputRev, map[string]any{
+		"job_id":         jobID,
+		"input_revision": inputRev,
+		"append":         true,
+	}); err != nil {
+		return nil, err
+	}
+	traffic, err := FindingTrafficTx(tx, existingID)
+	if err != nil {
+		return nil, err
+	}
+	return &RecordedFinding{FindingID: existingID, NodeID: nodeID, Traffic: traffic}, nil
 }
 
 type RecordedFinding struct {
@@ -340,8 +568,15 @@ type RecordedFinding struct {
 // ctx 由调用方传入本次事务所用的上下文（而非在内部取 context.Background）：
 // 事务内新加的推送事件写入同样应受调用方的取消与超时约束。
 func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, prepared []PreparedTrafficEvidence) (*RecordedFinding, error) {
+	// 归属/存活屏障必须在**任何**写入之前:包括 S3 追加分支。此前 append 分支
+	// 提前 return,绕过了 LockTaskEvidenceTx,于是跨任务或归档中的追加写入不受
+	// 约束。锁顺序统一为 task → finding。
 	if err := LockTaskEvidenceTx(tx, in.TaskID); err != nil {
 		return nil, err
+	}
+	// S3 追加验证:挂到既有 finding_id,不新建记录。
+	if in.ExistingFindingID > 0 {
+		return appendVerificationTx(tx, in, in.ExistingFindingID, prepared)
 	}
 	if in.TaskID > 0 {
 		var expID int64
@@ -404,7 +639,14 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeI
 	}
 	var err error
 	out.Traffic, err = FindingTrafficTx(tx, out.FindingID)
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	// V1:候选主张 + 验收任务 + 候选事件在同一事务内提交。
+	if _, err := recordClaimAndEnqueueTx(tx, out.FindingID, in, "candidate"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // RecordFinding is the atomic legacy/no-recorder path used by tools and tests.
@@ -453,24 +695,6 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 	return rows.Err()
 }
 
-func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, report string, version *int64) (n int64, err error) {
-	err = d.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
-		var id int64
-		if err := tx.QueryRow(`SELECT id FROM findings WHERE node_id=$1`, nodeID).Scan(&id); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil
-			}
-			return err
-		}
-		if err := LockFindingEvidenceTx(tx, id, version); err != nil {
-			return err
-		}
-		res, err := tx.Exec(`UPDATE findings SET report=$2,report_evidence_version=COALESCE($3::bigint,CASE WHEN evidence_version=0 THEN 0 ELSE -1 END) WHERE id=$1`, id, report, version)
-		if err != nil {
-			return err
-		}
-		n, err = res.RowsAffected()
-		return err
-	})
-	return
+func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, report string, version *int64) (int64, error) {
+	return d.SetFindingReportGated(ctx, nodeID, report, version)
 }

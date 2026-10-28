@@ -87,7 +87,7 @@ func TestEvidenceBindingLifecycle(t *testing.T) {
 	if len(r.Traffic.Bindings) != 3 || r.Traffic.Version != 1 {
 		t.Fatalf("record=%+v", r)
 	}
-	again, err := s.Bind(ctx, r.FindingID, []db.TrafficRef{{TrafficID: "1", Note: "must not overwrite"}})
+	again, err := s.Bind(ctx, r.FindingID, []db.TrafficRef{refs[1]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,14 +121,38 @@ func TestEvidenceBindingLifecycle(t *testing.T) {
 		}
 	}
 	v := again.Version
-	if _, err = s.DB.SetFindingReportVersionByNodeID(ctx, r.NodeID, "report", &v); err != nil {
+	if _, _, _, err = s.DB.SetFindingStatusWithNotify(ctx, r.FindingID, db.FindingConfirmed); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.DB.FanOutVerdictEvents(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.DB.ClaimEventJob(ctx, db.EventJobReportRun, time.Minute)
+	if err != nil || job == nil {
+		t.Fatal(job, err)
+	}
+	run, err := s.DB.PrepareReportRun(ctx, job.ID, job.LeaseGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Snapshot.FindingID != r.FindingID {
+		t.Fatal("wrong report subject")
+	}
+	if err = s.LoadVerificationBodies(ctx, run.Snapshot.Evidence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.RecordReportExecutionInput(ctx, run, &db.ReportExecutionInput{Snapshot: run.Snapshot, SystemPrompt: "local fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	reportCtx := db.WithReportRun(ctx, run)
+	if _, err = s.DB.SetFindingReportVersionByNodeID(reportCtx, r.NodeID, "report", &v); err != nil {
 		t.Fatal(err)
 	}
 	note := "updated"
 	if err = s.DB.EditFindingTraffic(ctx, r.FindingID, again.Bindings[0].ID, v, nil, &note, false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.DB.SetFindingReportVersionByNodeID(ctx, r.NodeID, "stale report", &v); !errors.Is(err, db.ErrEvidenceConflict) {
+	if _, err = s.DB.SetFindingReportVersionByNodeID(reportCtx, r.NodeID, "stale report", &v); !errors.Is(err, db.ErrReportStale) && !errors.Is(err, db.ErrVerdictNotSupported) {
 		t.Fatalf("stale report: %v", err)
 	}
 	f, err := s.DB.GetFinding(r.FindingID)
@@ -141,15 +165,15 @@ func TestEvidenceBindingLifecycle(t *testing.T) {
 	if err = s.DB.EditFindingTraffic(ctx, r.FindingID, again.Bindings[0].ID, v, nil, nil, true, nil); !errors.Is(err, db.ErrEvidenceConflict) {
 		t.Fatalf("stale delete: %v", err)
 	}
-	if _, err = s.DB.SetFindingReportByNodeID(r.NodeID, "legacy report"); err != nil {
-		t.Fatal(err)
+	if _, err = s.DB.SetFindingReportByNodeID(r.NodeID, "legacy report"); !errors.Is(err, db.ErrReportContextRequired) && !errors.Is(err, db.ErrVerdictNotSupported) {
+		t.Fatal("legacy write bypassed authority", err)
 	}
 	f, err = s.DB.GetFinding(r.FindingID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.ReportEvidenceVersion != -1 {
-		t.Fatal("legacy write claimed current evidence")
+	if f.Report != "report" || !f.ReportIsStale() {
+		t.Fatal("legacy write changed report or hid stale state")
 	}
 	if _, err = s.DB.DeleteFinding(r.FindingID); err != nil {
 		t.Fatal(err)

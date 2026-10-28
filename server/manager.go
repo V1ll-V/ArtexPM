@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1165,6 +1166,8 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	var committedMode string
 	err = m.pg.QueryRow(`UPDATE tasks
 	SET status=$2,
+	    run_epoch=run_epoch+CASE WHEN closing_reason<>'' OR paused OR queued OR status IN ('done','failed','timeout') THEN 1 ELSE 0 END,
+	    closing_reason='', closing_run_epoch=0, closing_since=NULL, closing_basis='',
 	    completed_at=CASE
 	        WHEN $2 IN ('done','failed','timeout') THEN COALESCE(completed_at, now())
 	        ELSE NULL
@@ -1401,6 +1404,32 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	}
 	m.mu.Unlock()
 	return true, nil
+}
+
+// Mirror an atomic, epoch-bound closing commit under the same lifecycle mutex
+// as pause/admission. A late mirror can never overwrite a newer live handle.
+func (m *Manager) CompleteTaskClosing(ctx context.Context, id string, epoch int64, reason string) (string, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return "", err
+	}
+	status, err := m.pg.CompleteClosing(ctx, n, epoch, reason)
+	if err != nil || status == "" {
+		return status, err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Status = status
+			if state.CompletedAt == 0 {
+				state.CompletedAt = time.Now().Unix()
+			}
+		})
+	}
+	m.mu.Unlock()
+	return status, nil
 }
 
 // SetTaskStatus persists a task's lifecycle status (e.g. "done") and reflects it
