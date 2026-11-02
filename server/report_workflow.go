@@ -209,7 +209,11 @@ func (sc *Scheduler) runReportQueue() {
 				if executionErr != nil {
 					cleanup, stop := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 					defer stop()
-					if err := sc.pg.FailEventJob(cleanup, job.ID, job.LeaseGeneration, executionErr.Error(), reportJobMaxAttempts); err != nil {
+					attemptLimit := reportJobMaxAttempts
+					if errors.Is(executionErr, agent.ErrReportNeedsEvidence) {
+						attemptLimit = 1
+					} // identical material cannot fix a semantic evidence gap
+					if err := sc.pg.FailEventJob(cleanup, job.ID, job.LeaseGeneration, executionErr.Error(), attemptLimit); err != nil {
 						log.Printf("[reporter] persist failure: %v", err)
 					}
 				}

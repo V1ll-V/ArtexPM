@@ -490,6 +490,7 @@ export interface FindingAsset {
 }
 
 export interface Finding {
+  report_draft?: string;
   verdict_detail?: {
     missing_evidence?: string[];
     unsupported_claims?: string[];

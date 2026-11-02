@@ -243,7 +243,7 @@ function FindingDetailInner() {
               <Card>
                 <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-sm">详细报告</CardTitle>
-                  {finding.report && <CopyButton text={finding.report} successMessage="已复制详细报告" />}
+                  {(finding.report || finding.report_draft) && <CopyButton text={finding.report || finding.report_draft || ""} successMessage="已复制报告" />}
                 </CardHeader>
                 <CardContent>
                   {finding.review_decision ? (
@@ -267,7 +267,7 @@ function FindingDetailInner() {
                   {finding.report ? (
                     <Markdown text={finding.report} />
                   ) : (
-                    <p className="text-sm text-muted-foreground">暂无详细报告。</p>
+                    finding.report_draft ? <Markdown text={finding.report_draft} /> : <p className="text-sm text-muted-foreground">暂无详细报告。</p>
                   )}
                 </CardContent>
               </Card>
