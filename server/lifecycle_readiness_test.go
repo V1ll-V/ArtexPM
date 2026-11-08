@@ -87,7 +87,7 @@ func TestLifecycleReadinessMissingConsumersSchemaAndStorage(t *testing.T) {
 	}
 }
 
-func TestLifecycleEngineAndSchedulerShareFailClosedSwitch(t *testing.T) {
+func TestTaskExecutionIndependentFromOptionalAutomation(t *testing.T) {
 	s, plan := lifecycleConfigServer(t)
 	if _, err := s.m.pg.MigrateVerificationConfig(t.Context(), plan); err != nil {
 		t.Fatal(err)
@@ -100,8 +100,8 @@ func TestLifecycleEngineAndSchedulerShareFailClosedSwitch(t *testing.T) {
 	pl, wk := &agent.Planner{}, &agent.Worker{}
 	resolverCalls := 0
 	s.engine.SetAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) { resolverCalls++; return pl, wk })
-	if p, w := s.engine.snapshotFor(&Task{ID: "fixture"}); p != nil || w != nil || resolverCalls != 0 {
-		t.Fatal("execution bypassed disabled switch")
+	if p, w := s.engine.snapshotFor(&Task{ID: "fixture"}); p != pl || w != wk || resolverCalls != 1 {
+		t.Fatal("optional automation blocked task execution")
 	}
 	task, err := s.m.pg.CreateTask("disabled", "keep jobs queued", nil, 0, 0)
 	if err != nil {
@@ -111,8 +111,8 @@ func TestLifecycleEngineAndSchedulerShareFailClosedSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.engine.Ready() {
-		t.Fatal("V0 ready with joint switch disabled")
+	if !s.engine.Ready() {
+		t.Fatal("configured LLM hidden by optional automation switch")
 	}
 	sc := newScheduler(s)
 	sc.fireVerdictWorkflow()
@@ -140,6 +140,23 @@ func TestLifecycleEngineAndSchedulerShareFailClosedSwitch(t *testing.T) {
 	row, err := s.m.pg.GetFinding(f.FindingID)
 	if err != nil || row == nil || !row.Projection().Effective || row.Report != "fixture" || row.ReportIsStale() || v.calls != 1 {
 		t.Fatal("enabled pipeline did not commit exact report", row, err, v.calls)
+	}
+}
+
+func TestMissingReporterDoesNotBlockCandidateVerification(t *testing.T) {
+	s, plan := lifecycleConfigServer(t)
+	s.SetVerifier(&fakeVerifier{})
+	if _, err := s.m.pg.MigrateVerificationConfig(t.Context(), plan); err != nil {
+		t.Fatal(err)
+	}
+	status := s.lifecycleStatus(t.Context())
+	if !status.ReadyForEnable {
+		t.Fatal("reporter unexpectedly required to enable candidate verification", status)
+	}
+	w := httptest.NewRecorder()
+	s.setLifecycleEnabled(w, httptest.NewRequest("POST", "/api/verification/lifecycle", strings.NewReader(`{"enabled":true}`)))
+	if w.Code != 200 || !s.lifecycleRunnable() || s.lifecycleStatus(t.Context()).ReadyForProduction {
+		t.Fatal("candidate/report readiness not separated", w.Code, w.Body)
 	}
 }
 

@@ -55,6 +55,75 @@ func privateVerificationDB(t *testing.T) *db.DB {
 
 type blockingVerification struct{ started chan time.Time }
 
+func TestGoalVerificationContinuesWithOptionalFindingAutomationDisabled(t *testing.T) {
+	d := privateVerificationDB(t)
+	task, err := d.CreateTask(t.Name(), "deliver a local inventory", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := d.Exploration(task.ExplorationID)
+	goal, err := es.AddGoal(map[string]any{"text": "deliver a local inventory"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact, err := es.AddNode(db.KindFact, map[string]any{"summary": "local inventory", "detail": map[string]any{"service": "LOCAL_PROOF", "paths": []string{"/one"}}}, 0, "confirmed", "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalJob, err := es.SubmitGoalEvidence(t.Context(), goal, fact, "local proof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding, err := es.RecordFinding(t.Context(), db.RecordFindingInput{TaskID: task.ID, Summary: "optional candidate", Evidence: "local only", Worker: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{pg: d, dir: t.TempDir()}
+	s := &Server{m: m, ctx: t.Context()}
+	s.engine = NewEngine(m)
+	s.engine.lifecycleReady = func() bool { return false }
+	s.SetVerifier(&fakeVerifier{result: db.VerdictResult{GoalVerdict: "met", Rationale: "local inventory supplied", PolicyVersion: db.VerdictPolicyVersion}})
+	sc := newScheduler(s)
+	sc.fireVerdictWorkflow()
+	sc.verifyWG.Wait()
+	var state string
+	if err = d.QueryRow(`SELECT state FROM verification_jobs WHERE id=$1`, goalJob).Scan(&state); err != nil || state != db.JobCommitted {
+		t.Fatal("goal blocked by optional switch", state, err)
+	}
+	if err = d.QueryRow(`SELECT state FROM exploration_nodes WHERE id=$1`, goal).Scan(&state); err != nil || state != "met" {
+		t.Fatal("goal not evaluated", state, err)
+	}
+	var attempts int
+	if err = d.QueryRow(`SELECT state,attempts FROM verification_jobs WHERE subject_kind='finding' AND subject_id=$1`, finding.FindingID).Scan(&state, &attempts); err != nil || state != db.JobQueued || attempts != 0 {
+		t.Fatal("disabled finding automation consumed work", state, attempts, err)
+	}
+}
+
+func TestMissingVerifierLeavesGoalQueuedWithoutConsumingAttempts(t *testing.T) {
+	d := privateVerificationDB(t)
+	task, err := d.CreateTask(t.Name(), "local proof", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	es := d.Exploration(task.ExplorationID)
+	goal, err := es.AddGoal(map[string]any{"text": "local proof"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := es.EnqueueGoalEvaluation(goal, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{m: &Manager{pg: d, dir: t.TempDir()}, ctx: t.Context()}
+	sc := newScheduler(s)
+	sc.runVerificationQueue()
+	var state string
+	var attempts int
+	if err = d.QueryRow(`SELECT state,attempts FROM verification_jobs WHERE id=$1`, id).Scan(&state, &attempts); err != nil || state != db.JobQueued || attempts != 0 {
+		t.Fatal(state, attempts, err)
+	}
+}
+
 func (v *blockingVerification) Verify(ctx context.Context, _ *db.EvidenceBundle) (db.VerdictResult, error) {
 	deadline, _ := ctx.Deadline()
 	v.started <- deadline

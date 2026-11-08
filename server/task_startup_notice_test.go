@@ -5,18 +5,20 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
-func TestCreateTaskReportsDisabledGateAndResumePreservesPause(t *testing.T) {
+func TestTaskReportsUnavailableExecutionModelAndOptionalSwitchDoesNotBlockResume(t *testing.T) {
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer m.Close()
 	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	s := newAdmissionTestServer(m, nil)
+	cancel() // no background planner/provider calls in this admission test
+	var available atomic.Bool
+	s := newAdmissionTestServer(m, func(*Task) bool { return available.Load() })
 	s.ctx = ctx
 	s.engine.lifecycleReady = func() bool { return false }
 	w := httptest.NewRecorder()
@@ -28,14 +30,15 @@ func TestCreateTaskReportsDisabledGateAndResumePreservesPause(t *testing.T) {
 	if err = json.Unmarshal(w.Body.Bytes(), &dto); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(dto.ExecutionBlockedReason, "未启用") {
-		t.Fatal("created response concealed disabled gate", w.Body)
+	if !strings.Contains(dto.ExecutionBlockedReason, "执行模型") {
+		t.Fatal("created response concealed unavailable execution model", w.Body)
 	}
 	task, ok := m.Task(dto.ID)
 	if !ok {
 		t.Fatal("saved task missing")
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
+	s.createGoals(t.Context(), task, nil)
 	goals, err := task.Store.HasOpenGoal()
 	if err != nil || !goals {
 		t.Fatal("original goal lost", goals, err)
@@ -43,15 +46,19 @@ func TestCreateTaskReportsDisabledGateAndResumePreservesPause(t *testing.T) {
 	if _, err = s.applyTaskControl(task, "pause"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.applyTaskControl(task, "resume"); err == nil || !strings.Contains(err.Error(), "候选验收") {
-		t.Fatal("resume did not explain block", err)
-	}
 	stored, err := m.pg.GetTask(mustTaskID(t, task.ID))
 	if err != nil || !stored.Paused {
-		t.Fatal("blocked resume mutated persisted pause", stored, err)
+		t.Fatal("pause did not persist", stored, err)
 	}
-	s.engine.lifecycleReady = func() bool { return true }
-	if reason := s.taskExecutionBlockReason(); reason != "" {
-		t.Fatal("stale block after enabling", reason)
+	available.Store(true)
+	if reason := s.taskExecutionBlockReason(task); reason != "" {
+		t.Fatal("optional switch still blocks task", reason)
+	}
+	if _, err = s.applyTaskControl(task, "resume"); err != nil {
+		t.Fatal("optional switch prevented resume", err)
+	}
+	stored, err = m.pg.GetTask(mustTaskID(t, task.ID))
+	if err != nil || stored.Paused {
+		t.Fatal("resume did not commit", stored, err)
 	}
 }

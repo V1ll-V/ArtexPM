@@ -5,6 +5,9 @@ export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | 
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+  mode?: "pentest" | "ctf";
+  challenge_type?: "auto" | "web" | "pwn" | "reverse";
+  inputs_blocked_reason?: string;
   execution_blocked_reason?: string;
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
@@ -40,6 +43,31 @@ export interface Task {
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
+}
+
+export interface TaskArtifact {
+  id: string;
+  name: string;
+  path: string;
+  size: number;
+  sha256: string;
+  role: "attachment" | "binary" | "libc" | "loader" | "source" | "input";
+  parent_id?: string;
+  analysis: {
+    format: string;
+    architecture?: string;
+    bits?: number;
+    endian?: string;
+    interpreter?: string;
+    error?: string;
+  };
+  created_at: string;
+}
+
+export interface ArtifactManifest {
+  files: TaskArtifact[];
+  revision: number;
+  blocked_reason?: string;
 }
 
 export interface TaskCategory {
@@ -1668,3 +1696,29 @@ export interface InterceptExecution {
   seq: number;
   items: Activity[];
 }
+export interface CTFToolStatus {
+  ok: boolean;
+  image?: string;
+  image_id?: string;
+  checked_at?: string;
+  error?: string;
+  tools: { name: string; group: string; ready: boolean; version: string; error: string }[];
+}
+export interface CTFExecution {
+  id: string; intent_id: number; input_hash: string; command: string; exit_code: number;
+  stdout: string; stderr: string; error?: string; truncated: boolean; started_at: string;
+}
+export interface CTFCandidate {
+  id: number; value: string; state: "candidate" | "accepted" | "rejected" | "stale";
+  execution_id: string; input_hash: string; revision: number; notes: string;
+}
+export interface CTFProgress {
+  phase: "not_started" | "solving" | "awaiting_confirmation" | "confirmed" | "paused" | "stopped";
+  task_status: TaskStatus;
+  paused: boolean;
+  input_hash: string;
+  execution_count: number;
+  pending_count: number;
+  accepted_count: number;
+}
+export interface CTFWriteup { revision: string; markdown: string; sha256: string; generated_at: string }

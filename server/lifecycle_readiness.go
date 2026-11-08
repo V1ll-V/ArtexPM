@@ -25,16 +25,24 @@ type lifecycleReadiness struct {
 	ReadyForProduction bool                         `json:"ready_for_production"`
 	Checks             []lifecycleCheck             `json:"checks"`
 	Version            string                       `json:"version"`
+	Models             verificationModels           `json:"models"`
 }
 
-// Dynamic checks fail closed on errors and configuration drift. The switch
-// controls V0 and both V1 consumers together; report/verdict guards always apply.
+// The switch only enables optional finding verification. Goal verification and
+// task execution have independent admission; report writes retain their guards.
 func (s *Server) lifecycleRunnable() bool {
 	if s == nil || s.m == nil || s.m.pg == nil {
 		return false
 	}
 	v, _, err := s.m.pg.GetSetting(lifecycleEnabledSetting)
-	if err != nil || v != "true" || s.currentVerifier() == nil || s.currentReportWriter() == nil {
+	if err != nil || v != "true" || s.currentVerifier() == nil {
+		return false
+	}
+	return s.automationStorageReady()
+}
+
+func (s *Server) automationStorageReady() bool {
+	if s == nil || s.m == nil || s.m.pg == nil || s.ctx == nil || s.ctx.Err() != nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -93,6 +101,7 @@ func (s *Server) lifecycleStatus(ctx context.Context) lifecycleReadiness {
 		return out
 	}
 	pg := s.m.pg
+	out.Models, _ = s.verificationModelBindings(ctx)
 	v, _, err := pg.GetSetting(lifecycleEnabledSetting)
 	out.Enabled = err == nil && v == "true"
 	add("schema", s.lifecycleSchemaReady(ctx), "生命周期表或版本列尚未就绪")
@@ -102,21 +111,25 @@ func (s *Server) lifecycleStatus(ctx context.Context) lifecycleReadiness {
 	out.Configuration = m
 	add("configuration", err == nil && m != nil && m.State == "ready", "提示词、工具或旧触发器存在待复核项；检查配置迁移接口")
 	add("critical_tools", s.lifecycleToolsReady(ctx), "候选登记或逐目标证明工具未启用；请核对工具设置")
-	add("verifier", s.currentVerifier() != nil, "请配置可用的验收模型")
-	add("reporter", s.currentReportWriter() != nil, "请配置可用的报告模型")
+	add("verifier", s.currentVerifier() != nil, "选择下方验收模型，或前往「模型配置」设置默认模型；不影响任务求解")
+	add("reporter", s.currentReportWriter() != nil, "选择下方报告模型，或启用 Reporter Agent；仅影响自动漏洞报告")
 	add("evidence_storage", s.evidenceStorageReady(true), "证据目录无法完成写入、持久化与校验")
 	add("runtime", s.ctx != nil && s.ctx.Err() == nil, "服务运行上下文不可用")
 	out.ReadyForEnable = true
 	for _, c := range out.Checks {
-		out.ReadyForEnable = out.ReadyForEnable && c.Ready
+		if c.Key != "reporter" {
+			out.ReadyForEnable = out.ReadyForEnable && c.Ready
+		}
 	}
-	out.ReadyForProduction = out.Enabled && out.ReadyForEnable
+	out.ReadyForProduction = out.Enabled && out.ReadyForEnable && s.currentReportWriter() != nil
 	if s.lifecycleSchemaReady(ctx) {
-		var vq, vf, rq, rf int
+		var vq, vf, rq, rf, gq, fq int
 		if err := pg.QueryRowContext(ctx, `SELECT
  (SELECT count(*) FROM verification_jobs WHERE state='queued'),(SELECT count(*) FROM verification_jobs WHERE state='failed'),
- (SELECT count(*) FROM event_jobs WHERE job_kind='report_run' AND state='queued'),(SELECT count(*) FROM event_jobs WHERE job_kind='report_run' AND state='failed')`).Scan(&vq, &vf, &rq, &rf); err == nil {
-			out.Work = map[string]int{"verification_queued": vq, "verification_failed": vf, "reports_queued": rq, "reports_failed": rf}
+ (SELECT count(*) FROM event_jobs WHERE job_kind='report_run' AND state='queued'),(SELECT count(*) FROM event_jobs WHERE job_kind='report_run' AND state='failed'),
+ (SELECT count(*) FROM verification_jobs WHERE subject_kind='goal' AND state='queued'),
+ (SELECT count(*) FROM verification_jobs WHERE subject_kind='finding' AND state='queued')`).Scan(&vq, &vf, &rq, &rf, &gq, &fq); err == nil {
+			out.Work = map[string]int{"verification_queued": vq, "verification_failed": vf, "reports_queued": rq, "reports_failed": rf, "goals_queued": gq, "findings_queued": fq}
 		}
 	}
 	return out
@@ -151,20 +164,20 @@ func (s *Server) setLifecycleEnabled(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.lifecycleStatus(r.Context()))
 }
 
-// taskExecutionBlockReason explains the global admission gate without changing
-// the ability to save a task before the instance is enabled.
-func (s *Server) taskExecutionBlockReason() string {
-	if s.engine == nil || s.engine.lifecycleReady == nil || s.engine.lifecycleReady() {
+func (s *Server) taskExecutionBlockReason(tasks ...*Task) string {
+	if s.engine == nil {
+		return "任务执行服务未就绪"
+	}
+	if len(tasks) > 0 && tasks[0] != nil {
+		t := tasks[0]
+		if reason := s.taskInputsBlockReason(t); reason != "" {
+			return reason
+		}
+		if s.engine.ReadyFor(t) {
+			return ""
+		}
+	} else if s.engine.Ready() {
 		return ""
 	}
-	status := s.lifecycleStatus(s.ctx)
-	if !status.Enabled {
-		return "任务已保存但尚未启动：候选验收联动流程未启用，请前往「系统 → 候选验收」完成检查并启用。"
-	}
-	for _, c := range status.Checks {
-		if !c.Ready {
-			return "任务尚不能启动：" + c.Reason + "；请前往「系统 → 候选验收」处理。"
-		}
-	}
-	return "任务尚不能启动，请前往「系统 → 候选验收」重新检查。"
+	return "任务尚无可用的执行模型：请在「系统 → 模型配置」设置默认模型，或在任务详情配置可用的任务模型。候选验收与报告配置不影响任务启动。"
 }

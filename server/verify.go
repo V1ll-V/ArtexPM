@@ -39,16 +39,31 @@ func (s *Server) currentVerifier() agent.Verifier {
 	if v != nil {
 		return v
 	}
+	id, err := s.verifierProfileID()
+	if err != nil {
+		return nil
+	}
+	if id != nil {
+		selected, _, ok := s.providerForProfile(*id)
+		if !ok {
+			return nil
+		}
+		return &agent.LLMVerifier{Prov: selected}
+	}
 	if prov != nil {
 		return &agent.LLMVerifier{Prov: prov}
 	}
 	return nil
 }
 func (s *Server) processVerificationJob(ctx context.Context, job *db.VerificationJob) error {
+	return s.processVerificationJobUsing(ctx, job, s.currentVerifier())
+}
+
+func (s *Server) processVerificationJobUsing(ctx context.Context, job *db.VerificationJob, verifier agent.Verifier) error {
 	if s == nil || s.m == nil {
 		return nil
 	}
-	err := processVerificationJobWith(ctx, s.m.pg, s.currentVerifier(), job, s.evidenceStore().LoadVerificationBodies)
+	err := processVerificationJobWith(ctx, s.m.pg, verifier, job, s.evidenceStore().LoadVerificationBodies)
 	if err == nil && job != nil {
 		var taskID int64
 		if job.SubjectKind == db.SubjectFinding {
@@ -168,7 +183,7 @@ func processVerificationJobWith(ctx context.Context, pg *db.DB, v agent.Verifier
 // Slots cover the entire execution, not just one scheduling tick. Cancellation
 // and execution timeout are independent of the longer DB lease.
 func (sc *Scheduler) runVerificationQueue() {
-	if sc == nil || sc.pg == nil || sc.s == nil || sc.s.currentVerifier() == nil {
+	if sc == nil || sc.pg == nil || sc.s == nil {
 		return
 	}
 	parent := sc.verificationCtx
@@ -194,7 +209,7 @@ func (sc *Scheduler) runVerificationQueue() {
 		default:
 			return
 		}
-		job, err := sc.pg.ClaimVerificationJob(parent, verificationLease)
+		job, verifier, err := sc.claimReadyVerification(parent)
 		if err != nil || job == nil {
 			<-sc.verifySlots
 			if err != nil {
@@ -203,12 +218,12 @@ func (sc *Scheduler) runVerificationQueue() {
 			return
 		}
 		sc.verifyWG.Add(1)
-		go func(j *db.VerificationJob) {
+		go func(j *db.VerificationJob, v agent.Verifier) {
 			defer sc.verifyWG.Done()
 			defer func() { <-sc.verifySlots }()
 			ctx, cancel := context.WithTimeout(parent, verificationTimeout)
 			defer cancel()
-			if err := sc.s.processVerificationJob(ctx, j); err != nil {
+			if err := sc.s.processVerificationJobUsing(ctx, j, v); err != nil {
 				// Cancellation must still leave a persisted retry/failure state.
 				cleanup, stop := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 				defer stop()
@@ -216,6 +231,36 @@ func (sc *Scheduler) runVerificationQueue() {
 					log.Printf("[verifier] 记录失败状态: %v", ferr)
 				}
 			}
-		}(job)
+		}(job, verifier)
+	}
+}
+
+func (sc *Scheduler) claimReadyVerification(ctx context.Context) (*db.VerificationJob, agent.Verifier, error) {
+	includeFindings := sc.s.engine == nil || sc.s.engine.lifecycleReady == nil || sc.s.engine.lifecycleReady()
+	var after int64
+	for {
+		candidates, err := sc.pg.VerificationCandidates(ctx, after, includeFindings)
+		if err != nil || len(candidates) == 0 {
+			return nil, nil, err
+		}
+		for _, candidate := range candidates {
+			after = candidate.ID
+			verifier := sc.s.currentVerifier()
+			if candidate.SubjectKind == db.SubjectGoal && candidate.TaskID > 0 && sc.s.m != nil {
+				if task, ok := sc.s.m.Task(fmt.Sprint(candidate.TaskID)); ok {
+					verifier = sc.s.verifierForTask(task)
+				}
+			}
+			if verifier == nil {
+				continue
+			}
+			job, err := sc.pg.ClaimVerificationJobByID(ctx, candidate.ID, verificationLease)
+			if err != nil {
+				return nil, nil, err
+			}
+			if job != nil {
+				return job, verifier, nil
+			}
+		}
 	}
 }

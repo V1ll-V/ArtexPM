@@ -51,6 +51,7 @@ type EvidenceRef struct {
 // EvidenceBundle keeps proposed claims, original proof and historical decisions
 // separate. InputHash identifies the frozen manifest, not a model's conclusion.
 type EvidenceBundle struct {
+	CTF                   *CTFGoalProof   `json:"ctf,omitempty"`
 	SubjectKind           string          `json:"subject_kind"`
 	SubjectID             int64           `json:"subject_id"`
 	TaskID                int64           `json:"task_id,omitempty"`
@@ -248,6 +249,10 @@ func buildGoalBundleTx(ctx context.Context, tx *sql.Tx, expID, id int64, reason 
 		return nil, err
 	}
 	b.GoalText = p.Text
+	b.CTF, err = ctfGoalProofTx(ctx, tx, b.TaskID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err = tx.QueryContext(ctx, `SELECT n.id,n.kind,n.payload,n.state,n.content_version,n.exploration_id,COALESCE(t.id,0)
  FROM exploration_edges e JOIN exploration_nodes n ON n.id=e.src_id LEFT JOIN tasks t ON t.exploration_id=n.exploration_id
  WHERE e.dst_id=$1 AND e.rel='proves' AND e.exploration_id=$2 ORDER BY n.id FOR UPDATE OF e,n`, id, expID)

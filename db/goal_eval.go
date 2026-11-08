@@ -200,6 +200,11 @@ func (s *ExplorationStore) CommitGoalEvaluation(ctx context.Context, id, generat
 			return fmt.Errorf("目标缺少当前有效的证明材料")
 		}
 		if verdict == "met" {
+			if e = RequireCTFAcceptedFlag(b); e != nil {
+				return e
+			}
+		}
+		if verdict == "met" {
 			if len(results) == 1 && len(results[0].MissingEvidence) > 0 {
 				return fmt.Errorf("目标仍有必要证据缺口")
 			}

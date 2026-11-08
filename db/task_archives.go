@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 4
+	TaskArchiveFormatVersion       = 5
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -621,6 +621,8 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		args  []any
 	}{
 		{"tasks", `SELECT * FROM tasks WHERE id=$1`, []any{taskID}},
+		{"ctf_executions", `SELECT * FROM ctf_executions WHERE task_id=$1 ORDER BY started_at,id`, []any{taskID}},
+		{"ctf_candidates", `SELECT * FROM ctf_candidates WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"explorations", `SELECT * FROM explorations WHERE id=$1`, []any{expID}},
 		{"exploration_nodes", `SELECT * FROM exploration_nodes WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"exploration_edges", `SELECT * FROM exploration_edges WHERE exploration_id=$1 ORDER BY src_id,dst_id`, []any{expID}},

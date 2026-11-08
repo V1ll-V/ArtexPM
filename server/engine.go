@@ -91,7 +91,7 @@ func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
 // (re)installed at runtime (LLM configured from the UI); the loops always run
 // but idle until an LLM is set.
 type Engine struct {
-	lifecycleReady func() bool // production V0/V1 joint switch; nil for isolated engines
+	lifecycleReady func() bool // optional finding/report automation; never gates task execution
 	m              *Manager
 	debounce       time.Duration
 
@@ -743,7 +743,9 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 // resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
 // failover chain); there is no global-pair fallback.
 func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
-	if e.lifecycleReady != nil && !e.lifecycleReady() {
+	// Persisted tasks always carry mode. Standalone resolver fixtures/integrations
+	// without registry metadata retain the previous execution contract.
+	if e.m != nil && t != nil && (t.Mode != "" || t.AttachmentBatchID != "") && e.m.taskInputsError(t) != nil {
 		return nil, nil
 	}
 	if e.resolve != nil {
@@ -758,7 +760,7 @@ func (e *Engine) snapshotFor(t *Task) (*agent.Planner, *agent.Worker) {
 // Ready reports whether a global LLM provider is configured (via the readiness
 // predicate wired at startup).
 func (e *Engine) Ready() bool {
-	return (e.lifecycleReady == nil || e.lifecycleReady()) && e.readiness != nil && e.readiness()
+	return e.readiness != nil && e.readiness()
 }
 
 // ReadyFor reports whether a specific task can resolve a planner/worker pair.
@@ -866,6 +868,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			}
 		}
 		if err := e.resumeFromClosing(t); err != nil {
+			return
+		}
+		if e.ctfSubmissionWaiting(ctx, t) {
 			return
 		}
 		planner, _ := e.snapshotFor(t)
@@ -1189,6 +1194,13 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if err != nil {
 		log.Printf("[worker %s] intent %d: %v", name, intent.ID, err)
 	}
+	if reason == agent.ReasonCTFSubmission && err == nil && t.Mode == "ctf" {
+		if stateErr := parkCTFSubmissionIntent(t.Store, intent.ID); stateErr != nil {
+			log.Printf("[ctf] task %s waiting intention %d: %v", t.ID, intent.ID, stateErr)
+		}
+		t.Notify()
+		return true
+	}
 	// terminal分流：撞步数上限 ≠ 完成。max_turns→exhausted（规划者据此知道这个方向
 	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
 	state := "done"
@@ -1294,6 +1306,9 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 }
 
 func (e *Engine) claimNext(ctx context.Context, t *Task, name string) *db.Node {
+	if e.ctfSubmissionWaiting(ctx, t) {
+		return nil
+	}
 	taskID, err := strconv.ParseInt(t.ID, 10, 64)
 	if err != nil || e.m == nil || e.m.pg == nil {
 		return nil

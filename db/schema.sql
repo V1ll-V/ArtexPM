@@ -546,6 +546,42 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false
 -- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
 -- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
+-- CTF task input metadata. Files and versioned manifests live under the task
+-- directory and are included by the existing cold archive file stage.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'pentest' CHECK (mode IN ('pentest','ctf'));
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS challenge_type TEXT NOT NULL DEFAULT '' CHECK (challenge_type IN ('','auto','web','pwn','reverse'));
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_batch_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_input_hash TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_attachment_batch ON tasks(attachment_batch_id) WHERE attachment_batch_id<>'';
+
+CREATE TABLE IF NOT EXISTS ctf_executions (
+    id TEXT PRIMARY KEY,
+    task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    intent_id BIGINT NOT NULL DEFAULT 0,
+    input_hash TEXT NOT NULL,
+    command TEXT NOT NULL,
+    exit_code INTEGER NOT NULL DEFAULT -1,
+    stdout_path TEXT NOT NULL DEFAULT '', stderr_path TEXT NOT NULL DEFAULT '',
+    stdout_sha TEXT NOT NULL DEFAULT '', stderr_sha TEXT NOT NULL DEFAULT '',
+    stdout_excerpt TEXT NOT NULL DEFAULT '', stderr_excerpt TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '', truncated BOOLEAN NOT NULL DEFAULT false,
+    files JSONB NOT NULL DEFAULT '[]',
+    environment JSONB NOT NULL DEFAULT '{}',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_ctf_exec_task ON ctf_executions(task_id,started_at,id);
+ALTER TABLE ctf_executions ADD COLUMN IF NOT EXISTS environment JSONB NOT NULL DEFAULT '{}';
+CREATE TABLE IF NOT EXISTS ctf_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    execution_id TEXT NOT NULL REFERENCES ctf_executions(id) ON DELETE CASCADE,
+    input_hash TEXT NOT NULL, value TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'candidate' CHECK(state IN ('candidate','accepted','rejected','stale')),
+    notes TEXT NOT NULL DEFAULT '', revision BIGINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(task_id,execution_id,value)
+);
+CREATE INDEX IF NOT EXISTS idx_ctf_candidates_task ON ctf_candidates(task_id,id);
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an
 -- exploration that already owns goals/history.

@@ -72,6 +72,9 @@ type LLMVerifier struct {
 
 // Verify 实现 Verifier。
 func (v *LLMVerifier) Verify(ctx context.Context, bundle *db.EvidenceBundle) (db.VerdictResult, error) {
+	if err := db.RequireCTFAcceptedFlag(bundle); err != nil {
+		return db.VerdictResult{GoalVerdict: "inconclusive", MissingEvidence: []string{err.Error()}, Rationale: err.Error()}, nil
+	}
 	if v == nil || v.Prov == nil {
 		return db.VerdictResult{}, fmt.Errorf("verifier 未配置模型")
 	}

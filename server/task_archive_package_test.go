@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"github.com/Autumn-27/artex/artifacts"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	pgdb "github.com/Autumn-27/artex/db"
@@ -16,13 +18,35 @@ func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
 	dataDir := t.TempDir()
 	taskID := "42"
 	explorationID := int64(73)
+	inputs := artifacts.Store{Root: dataDir}
+	draft, err := inputs.CreateDraft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := inputs.Add("draft", draft, "sample.c", "source", strings.NewReader("original source"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = inputs.Bind(draft, taskID); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := inputs.Inputs(42, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
 	taskFile := filepath.Join(dataDir, "tasks", taskID, "uploads", "evidence.txt")
 	transcriptFile := filepath.Join(dataDir, "transcripts", "exp73-worker-1.jsonl")
 	unrelatedTranscript := filepath.Join(dataDir, "transcripts", "exp74-worker-1.jsonl")
+	ctfLog := filepath.Join(dataDir, "tasks", taskID, "ctf", "executions", "sample", "stdout.log")
+	ctfScript := filepath.Join(dataDir, "tasks", taskID, "ctf", "executions", "sample", "script-01.py")
+	ctfWP := filepath.Join(dataDir, "tasks", taskID, "deliverables", "wp", "sample.md")
 	for path, body := range map[string]string{
 		taskFile:            "task evidence",
 		transcriptFile:      "transcript",
 		unrelatedTranscript: "leave me hot",
+		ctfLog:              "flag{archive_roundtrip}",
+		ctfScript:           "print('flag{archive_roundtrip}')",
+		ctfWP:               "# CTF write-up\nExecution evidence retained.",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -83,7 +107,14 @@ func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
 	if err := installed.commit(); err != nil {
 		t.Fatal(err)
 	}
-	for path, want := range map[string]string{taskFile: "task evidence", transcriptFile: "transcript"} {
+	if err := inputs.Verify(taskID, draft); err != nil {
+		t.Fatalf("restored attachment integrity: %v", err)
+	}
+	resumed, err := inputs.Inputs(42, 7)
+	if err != nil || resumed.Revision != pinned.Revision || len(resumed.Files) != 1 || resumed.Files[0].ID != a.ID {
+		t.Fatalf("restored input snapshot: %+v %v", resumed, err)
+	}
+	for path, want := range map[string]string{taskFile: "task evidence", transcriptFile: "transcript", ctfLog: "flag{archive_roundtrip}", ctfScript: "print('flag{archive_roundtrip}')", ctfWP: "# CTF write-up\nExecution evidence retained."} {
 		got, err := os.ReadFile(path)
 		if err != nil || string(got) != want {
 			t.Fatalf("restored %s = %q, %v; want %q", path, got, err, want)

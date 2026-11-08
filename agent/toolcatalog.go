@@ -34,9 +34,9 @@ type ToolSeed struct {
 func builtinToolsByAgent() map[string][]actool.CoreTool {
 	ts := NewToolSet(nil, "")
 	return map[string][]actool.CoreTool{
-		"mainagent": ts.MainAgentTools(),
-		"planner":   ts.PlannerTools(),
-		"worker":    ts.WorkerTools(),
+		"mainagent": append(ts.MainAgentTools(), ctfCatalogTools()...),
+		"planner":   append(ts.PlannerTools(), ctfCatalogTools()...),
+		"worker":    append(ts.WorkerTools(), ctfCatalogTools()...),
 		// goals（目标拆解器）默认绑 set_goals + set_constraints：靠它们把拆出的目标、
 		// 抽出的操作约束写进库。与 mainagent 共用同一受管工具，web 端可改描述/schema、按 agent 勾选。
 		"goals": {ts.setGoals(), ts.setConstraints()},
@@ -116,6 +116,20 @@ func DecorateTool(t actool.CoreTool, desc string, schema map[string]any) actool.
 	}
 	if len(schema) == 0 {
 		schema = t.InputSchema()
+	}
+	// Older catalog rows serialized no-argument tools as properties:null.
+	// Repair the model-facing copy too, so restored/edited old rows cannot
+	// reintroduce a schema that providers reject before executing any tool.
+	if schema["type"] == "object" {
+		props, typed := schema["properties"].(map[string]any)
+		if schema["properties"] == nil || (typed && props == nil) {
+			copy := make(map[string]any, len(schema)+1)
+			for key, value := range schema {
+				copy[key] = value
+			}
+			copy["properties"] = map[string]any{}
+			schema = copy
+		}
 	}
 	return &overriddenTool{CoreTool: t, desc: desc, schema: schema}
 }

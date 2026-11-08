@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/artifacts"
 	pgdb "github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/traffic"
 )
@@ -152,6 +153,9 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 		}
 	}()
 	streamPath := filepath.Join(fileStage.payload, filepath.FromSlash(pgdb.TaskArchiveLLMRecordsPath))
+	if err := (artifacts.Store{Root: filepath.Join(fileStage.payload, "files")}).Verify(taskID, task.AttachmentBatchID); err != nil {
+		return fmt.Errorf("附件完整性检查失败：%w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(streamPath), archiveDirMode); err != nil {
 		return err
 	}

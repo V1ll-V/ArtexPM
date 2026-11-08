@@ -378,6 +378,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
+	ctx, base = ctfBase(ctx, w.workDir, ts, taskID, intent.ID, base)
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 
@@ -394,6 +395,15 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
+	ctfMode := isCTFContext(ctx)
+	if ctfMode {
+		sysBody = ctfWorkerSystem
+	}
+	inputs, inputErr := taskInputContext(w.workDir, ts, taskID, intent.ID)
+	if inputErr != nil {
+		return "", WriteCounts{}, inputErr
+	}
+	sysBody += inputs
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
@@ -417,14 +427,21 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			}
 		}
 	}
-	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
+	if ctfMode {
+		sysBody += "\n\n执行当前 CTF 意图，得到候选 Flag 后立即交接并结束。"
+	} else {
+		sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
+	}
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
-	settle := wrapupSettlement("worker", []string{"Bash"})
+	settle := wrapupSettlement("worker", ctfExecutionTools)
 	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
+		settle = wrapupSettlementForTask("worker", ctfExecutionTools, clamped)
+	}
+	if ctfMode {
+		settle = &harness.Settlement{Prompt: ctfSettlePrompt, MaxTurns: 1, DisabledTools: ctfExecutionTools}
 	}
 	opts := agentcore.Options{
 		Provider:        w.prov,
@@ -470,6 +487,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks
+	}
+	var ctfGate *ctfSubmissionProvider
+	if ctfMode {
+		ctfGate = &ctfSubmissionProvider{Provider: opts.Provider, pg: ts.Database(), taskID: taskID}
+		opts.Provider = ctfGate
+		opts.Hooks = ctfSubmissionHooks{inner: hooks, gate: ctfGate}
 	}
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx
@@ -531,5 +554,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// still settles (no external hard-timeout backstop needed). ctx itself carries only
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
+	if ctfGate != nil && ctfGate.waited.Load() && err == nil {
+		reason = ReasonCTFSubmission
+	}
 	return reason, tsx.Writes(), err
 }

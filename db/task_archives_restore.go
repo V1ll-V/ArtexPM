@@ -87,6 +87,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if _, err := tx.Exec(`DELETE FROM side_question_sessions WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM ctf_executions WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
 	if err := retireTaskLifecycleTx(tx, taskID, true); err != nil {
 		return err
 	}
@@ -303,6 +306,25 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	for _, table := range []string{"ctf_executions", "ctf_candidates"} {
+		raw := remappedTables[table]
+		if len(raw) == 0 {
+			continue
+		}
+		rows, e := decodeArchiveRows(raw)
+		if e != nil {
+			return nil, e
+		}
+		for _, row := range rows {
+			id, _ := jsonInt64(row["task_id"])
+			if id != taskID {
+				return nil, fmt.Errorf("CTF archive task mismatch")
+			}
+		}
+		if err := insertArchiveRows(tx, table, raw); err != nil {
+			return nil, err
+		}
+	}
 	if err := restoreFindingTrafficTx(tx, snapshot); err != nil {
 		return nil, fmt.Errorf("restore finding traffic: %w", err)
 	}
@@ -350,6 +372,7 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
 		return err
 	}
 	_, err = tx.Exec(`UPDATE tasks current SET
+ mode=COALESCE(archived.mode,'pentest'),challenge_type=COALESCE(archived.challenge_type,''),attachment_batch_id=COALESCE(archived.attachment_batch_id,''),ctf_input_hash=COALESCE(archived.ctf_input_hash,''),
  name=archived.name,category_id=archived.category_id,description=archived.description,goal=archived.goal,
  status=archived.status,paused=archived.paused,queued=false,queued_at=NULL,queue_mode='',
  llm_profile_id=archived.llm_profile_id,active_llm_profile_id=archived.active_llm_profile_id,
@@ -421,6 +444,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		}
 	}
 	allowed := map[string]bool{
+		"ctf_executions": true, "ctf_candidates": true,
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,

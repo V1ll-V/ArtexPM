@@ -1,0 +1,5 @@
+FROM python:3.12-slim-bookworm
+COPY dist/amd64/ctf-runner /usr/local/bin/ctf-runner
+EXPOSE 8790
+VOLUME ["/state"]
+ENTRYPOINT ["/usr/local/bin/ctf-runner"]
