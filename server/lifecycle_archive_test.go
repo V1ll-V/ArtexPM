@@ -12,7 +12,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
-func TestLifecycleArchiveV4RealPackageRestoresAuditReportAndFiles(t *testing.T) {
+func TestLifecycleArchiveRealPackageRestoresAuditReportAndFiles(t *testing.T) {
 	d := privateVerificationDB(t)
 	var schema string
 	if err := d.QueryRow(`SELECT current_schema()`).Scan(&schema); err != nil {
@@ -80,7 +80,7 @@ func TestLifecycleArchiveV4RealPackageRestoresAuditReportAndFiles(t *testing.T) 
 		t.Fatal("hot proof file survived archive", err)
 	}
 	cold, err := s.m.pg.GetTaskArchive(a.ID)
-	if err != nil || cold.FormatVersion != 4 || cold.State != db.ArchiveReady {
+	if err != nil || cold.FormatVersion != db.TaskArchiveFormatVersion || cold.State != db.ArchiveReady {
 		t.Fatal(cold, err)
 	}
 	if _, err = s.m.pg.QueueTaskArchiveRestore(a.ID); err != nil {

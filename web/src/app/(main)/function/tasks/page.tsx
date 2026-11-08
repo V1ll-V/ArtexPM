@@ -26,7 +26,6 @@ import {
   FolderInputIcon,
   GripVerticalIcon,
   Loader2Icon,
-  PaperclipIcon,
   PauseIcon,
   PencilIcon,
   PinIcon,
@@ -47,6 +46,7 @@ import { toast } from "sonner";
 import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
+import { TaskAttachments } from "@/components/task-attachments";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { TaskTemplateControls } from "@/components/task-template-controls";
 import {
@@ -123,7 +123,6 @@ import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
   AssetInterceptRuleInput,
-  ChatAttachment,
   Company,
   DeleteTaskOptions,
   DeleteTaskResult,
@@ -135,29 +134,6 @@ import type {
   TaskStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-// fmtBytes renders a human file size for the upload manifest.
-function fmtBytes(n: number): string {
-  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
-  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(1)} KB`;
-  return `${n} B`;
-}
-
-// UPLOAD_MARKER labels the auto-appended block of uploaded-file paths inside the task
-// description, so re-uploads append under the same block instead of adding a new header.
-const UPLOAD_MARKER = "【上传文件（绝对路径）】";
-
-// appendUploads folds newly-uploaded files' ABSOLUTE paths into the description as a
-// Read/Bash-friendly manifest — the worker opens them by path. Keeps one marked block:
-// first upload adds the header, later uploads append bullets under it.
-function appendUploads(desc: string, atts: ChatAttachment[]): string {
-  const bullets = atts.map((a) => `- ${a.abs ?? a.path}（${fmtBytes(a.size)}）`).join("\n");
-  if (desc.includes(UPLOAD_MARKER)) {
-    return `${desc.replace(/\s*$/, "")}\n${bullets}\n`;
-  }
-  const head = desc.trim() ? `${desc.replace(/\s*$/, "")}\n\n` : "";
-  return `${head}${UPLOAD_MARKER} worker 可用 Read/Bash 按路径打开：\n${bullets}\n`;
-}
 
 // POLL_MS is the task-list refresh interval. Task state moves on the server (planner /
 // worker), so the list has to be pulled; 10s is plenty for status / 进度 / token 变化.
@@ -1223,9 +1199,7 @@ const TaskRow = React.memo(function TaskRow({
           const f = task.findings;
           const total = f ? f.critical + f.high + f.medium + f.low : 0;
           if (!f || total === 0) return <span className="text-muted-foreground">0</span>;
-          const seg = (n: number, cls: string) => (
-            <span className={n > 0 ? cls : "text-muted-foreground"}>{n}</span>
-          );
+          const seg = (n: number, cls: string) => <span className={n > 0 ? cls : "text-muted-foreground"}>{n}</span>;
           return (
             <span className="font-medium whitespace-nowrap" title="严重 / 高 / 中 / 低">
               {seg(f.critical, "text-rose-600 dark:text-rose-400")}
@@ -1373,6 +1347,7 @@ function TaskNameEditor({ task, onRename }: { task: Task; onRename: (task: Task,
       >
         {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
       </Link>
+      {task.mode === "ctf" && <Badge variant="secondary" className="shrink-0 text-[10px]">CTF · {(task.challenge_type || "auto").toUpperCase()}</Badge>}
       <Button
         type="button"
         variant="ghost"
@@ -3088,11 +3063,10 @@ function CreateTaskSheet({
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
-  // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
+  const [mode, setMode] = React.useState<"pentest" | "ctf">("pentest");
+  const [challengeType, setChallengeType] = React.useState<"auto" | "web" | "pwn" | "reverse">("auto");
   const [uploading, setUploading] = React.useState(false);
-  const [uploadCount, setUploadCount] = React.useState(0);
-  const draftIdRef = React.useRef<string>("");
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [attachmentDraft, setAttachmentDraft] = React.useState("");
   const sheetContentRef = React.useRef<HTMLDivElement>(null);
 
   // load LLM profiles once for the create-task profile picker.
@@ -3107,28 +3081,6 @@ function CreateTaskSheet({
       .catch(() => setCompanies([]));
   }, []);
 
-  // pickFiles uploads the chosen files into this draft's staging dir and appends their
-  // absolute paths to the description; the task's agents open them by path via Read/Bash.
-  async function pickFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
-    // crypto.randomUUID 仅在安全上下文可用(https/localhost);经 IP+http 访问时降级。
-    if (!draftIdRef.current) {
-      draftIdRef.current =
-        globalThis.crypto?.randomUUID?.() ?? `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-    }
-    setUploading(true);
-    try {
-      const r = await api.chatUpload("staging", draftIdRef.current, Array.from(files));
-      setDescription((prev) => appendUploads(prev, r.attachments));
-      setUploadCount((n) => n + r.attachments.length);
-    } catch (e) {
-      toast.error("上传失败：" + (e as Error).message);
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = ""; // allow re-picking the same file
-    }
-  }
-
   async function createTask() {
     if (!description.trim() || !goal.trim()) {
       toast.error("请填写描述与目标");
@@ -3142,7 +3094,10 @@ function CreateTaskSheet({
     try {
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
-      await api.createTask({
+      const createdTask = await api.createTask({
+        mode,
+        challengeType,
+        attachmentBatchId: attachmentDraft,
         name: name.trim(),
         categoryId: categoryID,
         description: description.trim(),
@@ -3158,7 +3113,9 @@ function CreateTaskSheet({
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
       });
-      toast.success("任务已创建");
+      if (createdTask.inputs_blocked_reason || createdTask.execution_blocked_reason)
+        toast.warning(createdTask.inputs_blocked_reason || createdTask.execution_blocked_reason, { duration: 12000 });
+      else toast.success("任务已创建");
       setName("");
       setCategoryID(undefined);
       setDescription("");
@@ -3172,8 +3129,9 @@ function CreateTaskSheet({
       setSeedFirstIntent(false);
       setCoverageEnabled(true);
       setInterceptRules([]);
-      setUploadCount(0);
-      draftIdRef.current = "";
+      setAttachmentDraft("");
+      setMode("pentest");
+      setChallengeType("auto");
       setOpen(false);
       onCreated();
     } catch (e) {
@@ -3216,10 +3174,45 @@ function CreateTaskSheet({
                 setGoal(template.goal);
                 setCategoryID(template.category_id ?? undefined);
                 setInterceptRules(template.intercept_rules ?? []);
-                setUploadCount(0);
               }}
               portalContainer={sheetContentRef}
             />
+            <div className="grid gap-2">
+              <Label htmlFor="task-mode">任务模式</Label>
+              <select
+                id="task-mode"
+                className="h-9 rounded-md border bg-background px-3 text-sm"
+                value={mode}
+                onChange={(e) => {
+                  const next = e.target.value as "pentest" | "ctf";
+                  setMode(next);
+                  setCoverageEnabled(next === "pentest");
+                  if (next === "ctf" && !goal.trim()) setGoal("分析本题并获得可验证的 flag，保留解题脚本和原始输出。");
+                }}
+              >
+                <option value="pentest">授权渗透测试</option>
+                <option value="ctf">CTF 解题</option>
+              </select>
+              {mode === "ctf" && (
+                <>
+                  <Label htmlFor="challenge-type">题型</Label>
+                  <select
+                    id="challenge-type"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={challengeType}
+                    onChange={(e) => setChallengeType(e.target.value as typeof challengeType)}
+                  >
+                    <option value="auto">自动分析</option>
+                    <option value="web">Web</option>
+                    <option value="pwn">Pwn</option>
+                    <option value="reverse">RE / Reverse</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    沿用任务规划、执行和验收流程。可只提供附件；执行所需工具和运行环境需已配置。
+                  </p>
+                </>
+              )}
+            </div>
             <div className="grid gap-2">
               <Label htmlFor="name">名称（可选）</Label>
               <Input
@@ -3249,31 +3242,11 @@ function CreateTaskSheet({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
               />
-              {/* 上传文件(可多选):暂存到 drafts/,把绝对路径追加进上方描述,worker 据此 Read/Bash 打开。 */}
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={(e) => void pickFiles(e.target.files)}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                >
-                  {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
-                  上传文件
-                </Button>
-                <span className="text-muted-foreground text-xs">
-                  {uploadCount > 0
-                    ? `已上传 ${uploadCount} 个文件，绝对路径已追加到描述末尾（可编辑）`
-                    : "可多选；上传后把文件的绝对路径追加到描述，供 worker 用 Read/Bash 打开"}
-                </span>
-              </div>
+              <TaskAttachments
+                draftId={attachmentDraft}
+                onDraftChange={setAttachmentDraft}
+                onBusyChange={setUploading}
+              />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="goal">目标</Label>

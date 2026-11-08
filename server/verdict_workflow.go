@@ -55,9 +55,6 @@ func (sc *Scheduler) fireVerdictWorkflow() {
 	if sc == nil || sc.pg == nil {
 		return
 	}
-	if sc.s != nil && sc.s.engine != nil && sc.s.engine.lifecycleReady != nil && !sc.s.engine.lifecycleReady() {
-		return
-	}
 	// Configuration migration runs before scheduling. Unknown/custom triggers
 	// remain visible for review; their old write tools remain fail-closed.
 	ctx := sc.verificationCtx
@@ -68,6 +65,11 @@ func (sc *Scheduler) fireVerdictWorkflow() {
 		ctx = context.Background()
 	}
 	sc.runVerificationQueue()
+	// Goal proof evaluation remains available when optional finding/report
+	// automation is disabled; it is needed for ordinary task completion too.
+	if sc.s != nil && sc.s.engine != nil && sc.s.engine.lifecycleReady != nil && !sc.s.engine.lifecycleReady() {
+		return
+	}
 	if _, _, err := sc.pg.FanOutVerdictEvents(ctx, 20); err != nil {
 		log.Printf("[verdict] event fan-out: %v", err)
 		return

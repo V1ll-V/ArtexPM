@@ -42,7 +42,8 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		cleanup = func() {}
 		out     = base
 	)
-	if ToolAugment != nil {
+	ctfScoped, _ := ctx.Value(ctfRunKey{}).(bool)
+	if ToolAugment != nil && !ctfScoped {
 		var extra []actool.CoreTool
 		var cl func()
 		extra, def, cl = ToolAugment(ctx, agentKey)
@@ -59,6 +60,19 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	// and pass through untouched, so deferred/unlock wiring stays consistent.
 	if ToolResolve != nil {
 		out = ToolResolve(ctx, agentKey, out)
+	}
+	if ctfScoped {
+		allowed := map[string]bool{}
+		for _, t := range base {
+			allowed[t.Name()] = true
+		}
+		filtered := make([]actool.CoreTool, 0, len(out))
+		for _, t := range out {
+			if allowed[t.Name()] {
+				filtered = append(filtered, t)
+			}
+		}
+		out = filtered
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
 	for i, t := range out {

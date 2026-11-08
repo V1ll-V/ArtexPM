@@ -263,6 +263,9 @@ func pidList(raw []json.RawMessage) []int64 {
 }
 
 func obj(props map[string]any, required ...string) map[string]any {
+	if props == nil {
+		props = map[string]any{}
+	}
 	m := map[string]any{"type": "object", "properties": props}
 	if len(required) > 0 {
 		m["required"] = required

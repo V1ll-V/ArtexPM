@@ -1,0 +1,34 @@
+# A local, independently versioned toolbox. Pwn and RE Python dependencies are
+# separated: pwntools 4.15 excludes Unicorn 2.1.4, while angr's extra uses it.
+FROM golang:1.26
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    binutils build-essential ca-certificates checksec curl file gdb gdbserver \
+    libc6-i386 libc6-dev-i386 libffi-dev libssl-dev ltrace netcat-openbsd patchelf \
+    python3 python3-venv python3-dev ruby ruby-dev strace unzip xxd openjdk-21-jdk-headless \
+    qemu-user socat && rm -rf /var/lib/apt/lists/*
+COPY docker/ctf-tools/pwn-requirements.txt docker/ctf-tools/re-requirements.txt /opt/ctf/
+RUN python3 -m venv /opt/ctf/pwn && /opt/ctf/pwn/bin/pip install --no-cache-dir -r /opt/ctf/pwn-requirements.txt \
+    && python3 -m venv /opt/ctf/re && /opt/ctf/re/bin/pip install --no-cache-dir -r /opt/ctf/re-requirements.txt \
+    && /opt/ctf/pwn/bin/pip check && /opt/ctf/re/bin/pip check \
+    && /opt/ctf/pwn/bin/pip freeze > /opt/ctf/pwn-lock.txt \
+    && /opt/ctf/re/bin/pip freeze > /opt/ctf/re-lock.txt \
+    && printf '#!/bin/sh\nexec /opt/ctf/re/bin/python3 "$@"\n' > /usr/local/bin/ctf-python-re \
+    && chmod +x /usr/local/bin/ctf-python-re \
+    && gem install one_gadget -v 2.1.1 --no-document
+RUN curl -fL --retry 3 -o /tmp/radare2.deb https://github.com/radareorg/radare2/releases/download/6.2.4/radare2_6.2.4_amd64.deb \
+    && echo '7019eedc0e0e87d1f53d6b8f5fc62b898567679c5efdce7fbfc557c9e7655e90  /tmp/radare2.deb' | sha256sum -c - \
+    && dpkg -i /tmp/radare2.deb && rm /tmp/radare2.deb \
+    && curl -fL --retry 3 -o /usr/local/bin/pwninit https://github.com/io12/pwninit/releases/download/3.3.3/pwninit \
+    && echo 'f124b6645b01b0fc4adacabe61438fe73eef517dc3e4696a08e1250a8f47eec3  /usr/local/bin/pwninit' | sha256sum -c - \
+    && chmod +x /usr/local/bin/pwninit
+RUN curl -fL --retry 3 -o /tmp/ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip \
+    && echo 'ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db  /tmp/ghidra.zip' | sha256sum -c - \
+    && unzip -q /tmp/ghidra.zip -d /opt/ctf && rm /tmp/ghidra.zip \
+    && ln -s /opt/ctf/ghidra_12.1.4_PUBLIC/support/analyzeHeadless /usr/local/bin/analyzeHeadless
+COPY docker/ctf-tools/ExportFunctions.java /opt/ctf/scripts/ExportFunctions.java
+COPY docker/ctf-tools/doctor.py /opt/ctf/doctor.py
+ENV PATH="/opt/ctf/pwn/bin:${PATH}" HOME=/work XDG_CACHE_HOME=/work/.cache XDG_CONFIG_HOME=/work/.config JAVA_TOOL_OPTIONS="-Duser.home=/work" PYTHONPYCACHEPREFIX=/tmp/pycache PWNLIB_NOTERM=1 TERM=dumb
+RUN useradd --uid 1000 --create-home ctf && mkdir -p /work && chown 1000:1000 /work
+USER 1000:1000
+WORKDIR /work
+CMD ["sleep", "infinity"]

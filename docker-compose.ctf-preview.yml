@@ -1,0 +1,57 @@
+# Isolated local preview of CTF inputs, Pwn/RE execution, evidence and write-ups.
+# Start with: docker compose --env-file data/ctf-preview.env -p artex-ctf-preview -f docker-compose.ctf-preview.yml up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: artex_preview
+      POSTGRES_PASSWORD: ${ARTEX_CTF_PREVIEW_DB_PASSWORD:?请创建 data/ctf-preview.env}
+      POSTGRES_DB: artex_preview
+    volumes:
+      - preview_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U artex_preview -d artex_preview"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  artex:
+    image: autumn27/artex:ctf-complete-20261108
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ctf-runner:
+        condition: service_healthy
+    environment:
+      ARTEX_PG_DSN: postgres://artex_preview:${ARTEX_CTF_PREVIEW_DB_PASSWORD}@postgres:5432/artex_preview?sslmode=disable
+      ARTEX_CTF_RUNNER_URL: http://ctf-runner:8790
+      ARTEX_CTF_RUNNER_TOKEN: ${ARTEX_CTF_RUNNER_TOKEN:?请在 data/ctf-preview.env 设置执行器令牌}
+    ports:
+      - "127.0.0.1:8789:8787"
+    volumes:
+      - preview_data:/app/data
+      - preview_skills:/app/skills
+    restart: unless-stopped
+
+  ctf-runner:
+    image: autumn27/artex-ctf-runner:20261107
+    environment:
+      ARTEX_CTF_RUNNER_TOKEN: ${ARTEX_CTF_RUNNER_TOKEN:?请在 data/ctf-preview.env 设置执行器令牌}
+      ARTEX_CTF_TOOL_IMAGE: autumn27/artex-ctf-tools:20261107
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - preview_runner_state:/state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8790/health',headers={'Authorization':'Bearer '+os.environ['ARTEX_CTF_RUNNER_TOKEN']}); urllib.request.urlopen(r,timeout=3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  preview_pgdata:
+  preview_data:
+  preview_skills:
+  preview_runner_state:

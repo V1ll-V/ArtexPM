@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { usePathname } from "next/navigation";
 
+import { TaskExecutionNotice } from "@/components/task-execution-notice";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useCurrentUser } from "@/hooks/use-current-user";
@@ -44,7 +45,7 @@ export function MainContent({ children }: { children: ReactNode }) {
   }, []);
 
   if (isFullBleed(pathname)) {
-    return <>{children}</>;
+    return <><TaskExecutionNotice />{children}</>;
   }
 
   return (
@@ -76,6 +77,7 @@ export function MainContent({ children }: { children: ReactNode }) {
         </div>
       </header>
       <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden p-4 has-data-[content-padding=false]:p-0 md:p-6 md:has-data-[content-padding=false]:p-0">
+        {pathname.startsWith("/function/tasks") && <TaskExecutionNotice />}
         {children}
       </div>
     </>

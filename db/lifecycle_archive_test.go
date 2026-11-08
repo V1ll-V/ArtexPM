@@ -118,7 +118,7 @@ func TestLifecycleArchiveFreezesAndIncludesAllHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, s := snapshotLifecycleFixture(t, x)
-	if s.FormatVersion != 4 {
+	if s.FormatVersion != TaskArchiveFormatVersion {
 		t.Fatal(s.FormatVersion)
 	}
 	for _, name := range lifecycleArchiveTables {
@@ -302,6 +302,37 @@ func TestLifecycleArchiveLegacyNeverAutoSupportsAndKeepsHumanRejection(t *testin
 				t.Fatal("legacy human rejection lost", row, err)
 			}
 		})
+	}
+}
+
+func TestLifecycleArchiveV4RestoresWithoutCTFMetadata(t *testing.T) {
+	x := newLifecycleArchiveFixture(t)
+	a, s := compactLifecycleFixture(t, x)
+	s.FormatVersion = 4
+	delete(s.Tables, "ctf_executions")
+	delete(s.Tables, "ctf_candidates")
+	rows, err := decodeArchiveRows(s.Tables["tasks"])
+	if err != nil || len(rows) != 1 {
+		t.Fatal("task snapshot", err)
+	}
+	for _, key := range []string{"mode", "challenge_type", "attachment_batch_id", "ctf_input_hash"} {
+		delete(rows[0], key)
+	}
+	s.Tables["tasks"], err = json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreLifecycleFixture(t, x, a, s)
+	if err = x.d.CompleteTaskArchiveRestore(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := x.d.GetTask(x.task)
+	if err != nil || task.Mode != "pentest" || task.ChallengeType != "" || task.AttachmentBatchID != "" {
+		t.Fatalf("legacy task defaults: %+v %v", task, err)
+	}
+	verdict, _, err := x.d.FindingVerdictByID(t.Context(), x.f.FindingID)
+	if err != nil || !FindingVerdictEffective(verdict.State()) {
+		t.Fatal("v4 verdict history lost", verdict, err)
 	}
 }
 

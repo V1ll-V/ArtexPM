@@ -339,3 +339,27 @@ func TestReportQueueHoldsLeaseUntilCommitAndCancelsAcrossTicks(t *testing.T) {
 		t.Fatal("shutdown lost durable report work")
 	}
 }
+
+func TestReportNeedsEvidenceDoesNotSpendThreeIdenticalAttempts(t *testing.T) {
+	d := privateVerificationDB(t)
+	id := enqueuePlainReport(t, d)
+	calls := 0
+	s := &Server{m: &Manager{pg: d, dir: t.TempDir()}, ctx: t.Context()}
+	s.SetReportWriter(callbackReportWriter(func(context.Context, *db.ReportExecutionInput) (string, error) {
+		calls++
+		return "", fmt.Errorf("%w: missing baseline", agent.ErrReportNeedsEvidence)
+	}))
+	sc := newScheduler(s)
+	sc.runReportQueue()
+	sc.reportWG.Wait()
+	sc.runReportQueue()
+	sc.reportWG.Wait()
+	var state string
+	var attempts int
+	if err := d.QueryRow(`SELECT state,attempts FROM event_jobs WHERE id=$1`, id).Scan(&state, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || attempts != 1 || state != "failed" {
+		t.Fatal(calls, attempts, state)
+	}
+}

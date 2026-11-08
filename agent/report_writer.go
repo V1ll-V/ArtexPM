@@ -3,12 +3,15 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/llm"
 )
+
+var ErrReportNeedsEvidence = errors.New("报告需要补证据")
 
 type ReportWriter interface {
 	WriteReport(context.Context, *db.ReportExecutionInput) (string, error)
@@ -51,7 +54,7 @@ func (w *LLMReportWriter) WriteReport(ctx context.Context, input *db.ReportExecu
 	if !db.VerificationMaterialComplete(input.Snapshot.Evidence) {
 		return "", fmt.Errorf("报告缺少已校验的必要正文")
 	}
-	raw, err := json.MarshalIndent(input.Snapshot, "", "  ")
+	raw, err := json.Marshal(input.Snapshot)
 	if err != nil {
 		return "", err
 	}
@@ -80,7 +83,7 @@ func ParseReportJSON(text string) (string, error) {
 		return "", fmt.Errorf("Reporter 输出格式错误: %w", err)
 	}
 	if out.Status == "needs_evidence" {
-		return "", fmt.Errorf("报告需要补证据: %s", out.Reason)
+		return "", fmt.Errorf("%w: %s", ErrReportNeedsEvidence, out.Reason)
 	}
 	if out.Status != "ready" || strings.TrimSpace(out.Report) == "" || len(out.Report) > 512*1024 {
 		return "", fmt.Errorf("Reporter 必须返回有效的 ready 报告")

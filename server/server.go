@@ -731,6 +731,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
 	mux.HandleFunc("DELETE /api/tasks/{id}/assets/{assetID}", s.detachTaskAsset)
 	mux.HandleFunc("GET /api/tasks/{id}/intent-assets", s.taskIntentAssets)
+	mux.HandleFunc("POST /api/task-upload-drafts", s.createArtifactDraft)
+	mux.HandleFunc("GET /api/task-upload-drafts/{draftID}/files", s.listArtifacts)
+	mux.HandleFunc("POST /api/task-upload-drafts/{draftID}/files", s.uploadArtifacts)
+	mux.HandleFunc("PATCH /api/task-upload-drafts/{draftID}/files/{artifactID}", s.editArtifact)
+	mux.HandleFunc("POST /api/task-upload-drafts/{draftID}/files/{artifactID}/extract", s.extractArtifact)
+	mux.HandleFunc("GET /api/tasks/{id}/artifacts", s.listArtifacts)
+	mux.HandleFunc("POST /api/tasks/{id}/artifacts", s.uploadArtifacts)
+	mux.HandleFunc("PATCH /api/tasks/{id}/artifacts/{artifactID}", s.editArtifact)
+	mux.HandleFunc("POST /api/tasks/{id}/artifacts/{artifactID}/extract", s.extractArtifact)
+	mux.HandleFunc("GET /api/tasks/{id}/artifacts/{artifactID}/download", s.downloadArtifact)
+	mux.HandleFunc("POST /api/tasks/{id}/artifacts/retry", s.retryArtifactBind)
 
 	// 工作空间文件管理器（针对 workDir）
 	mux.HandleFunc("GET /api/workspace/list", s.wsList)
@@ -798,6 +809,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/verification/config-migration", s.getVerificationConfigMigration)
 	mux.HandleFunc("GET /api/verification/readiness", s.getLifecycleReadiness)
 	mux.HandleFunc("POST /api/verification/lifecycle", s.setLifecycleEnabled)
+	mux.HandleFunc("PUT /api/verification/models", s.setVerificationModels)
 	mux.HandleFunc("POST /api/verification/config-migration/retry", s.retryVerificationConfigMigration)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
@@ -845,6 +857,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/notify/deliveries/{id}/retry", s.notifyRetryDelivery)
 	mux.HandleFunc("POST /api/settings/web-search/test", s.testWebSearch)
 	mux.HandleFunc("GET /api/report", s.getReport)
+	mux.HandleFunc("GET /api/ctf/tools", s.ctfToolsStatus)
+	mux.HandleFunc("GET /api/tasks/{id}/ctf/wp", s.ctfWP)
+	mux.HandleFunc("POST /api/tasks/{id}/ctf/wp", s.ctfWP)
+	mux.HandleFunc("GET /api/tasks/{id}/ctf/evidence", s.ctfEvidence)
+	mux.HandleFunc("POST /api/tasks/{id}/ctf/candidates/{candidateID}", s.decideCTFFlag)
+	mux.HandleFunc("GET /api/tasks/{id}/ctf/executions/{executionID}/log", s.ctfExecutionLog)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
@@ -1078,6 +1096,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
 		dto := taskDTO(t, s.resolvedTaskStatus(t))
+		dto.InputsBlockedReason = s.taskInputsBlockReason(t)
 		applyTaskArchiveBlocker(&dto, archiveBlockers)
 		metric := metrics[t.ExpID]
 		dto.Tokens = tokenTotalDTO(metric.Tokens)
@@ -1477,6 +1496,9 @@ func truncateReply(s string) string {
 }
 
 type createTaskReq struct {
+	Mode                 string   `json:"mode"`
+	ChallengeType        string   `json:"challenge_type"`
+	AttachmentBatchID    string   `json:"attachment_batch_id"`
 	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
 	CategoryID           *int64   `json:"category_id,omitempty"`
 	Description          string   `json:"description"`
@@ -1501,6 +1523,20 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.Description) == "" {
 		req.Description = "未命名任务"
+	}
+	if _, _, err := db.NormalizeTaskMode(req.Mode, req.ChallengeType); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if !db.ValidAttachmentBatch(req.AttachmentBatchID) {
+		writeErr(w, 400, "附件批次无效")
+		return
+	}
+	if req.AttachmentBatchID != "" {
+		if err := s.artifactStore().TouchDraft(req.AttachmentBatchID); err != nil {
+			writeErr(w, 400, "附件草稿不存在或已绑定任务")
+			return
+		}
 	}
 	if len(req.LLMProfileIDs) == 0 && req.LLMProfileID != nil {
 		req.LLMProfileIDs = []int64{*req.LLMProfileID}
@@ -1543,6 +1579,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
+		Mode: req.Mode, ChallengeType: req.ChallengeType, AttachmentBatchID: req.AttachmentBatchID,
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
@@ -1550,6 +1587,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		InterceptRules:  interceptRules,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrTaskModeInvalid) {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
 			writeErr(w, 400, "任务分类不存在或无效")
 			return
@@ -1565,7 +1606,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
-	writeJSON(w, 201, taskDTO(t, s.resolvedTaskStatus(t)))
+	dto := taskDTO(t, s.resolvedTaskStatus(t))
+	dto.InputsBlockedReason = s.taskInputsBlockReason(t)
+	dto.ExecutionBlockedReason = s.taskExecutionBlockReason(t)
+	writeJSON(w, 201, dto)
 }
 
 func (s *Server) validateTaskProfileIDs(ids []int64) error {
@@ -1766,6 +1810,7 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dto := taskDTO(t, s.resolvedTaskStatus(t))
+	dto.InputsBlockedReason = s.taskInputsBlockReason(t)
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	applyTaskArchiveBlocker(&dto, archiveBlockers)
 	writeJSON(w, 200, dto)
@@ -2108,6 +2153,7 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 	}
 	assets := s.resolveAssetIDs(f.AssetIDs)
 	dto := findingFromDB(f, assets)
+	dto.ReportDraft = report.CandidateReport(f)
 	if contextTaskID := strings.TrimSpace(r.URL.Query().Get("context_task")); contextTaskID != "" {
 		contextTask := s.m.ResolveTask(contextTaskID)
 		if contextTask == nil {
@@ -3889,6 +3935,14 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no active task")
 		return
 	}
+	if t.Mode == "ctf" {
+		r.SetPathValue("id", t.ID)
+		q := r.URL.Query()
+		q.Set("download", "1")
+		r.URL.RawQuery = q.Encode()
+		s.ctfWP(w, r)
+		return
+	}
 	findings, err := s.m.pg.ListFindingsForExport(db.FindingFilter{TaskID: t.ID}, nil)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -3919,9 +3973,41 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"entries": t.Guard.Audit(), "attributions": t.Guard.Attributions()})
 }
 
-// gc is a no-op stub (GC not yet implemented in the new asset store).
+// gc collects only unbound generated attachment drafts. Task-owned files and
+// database-referenced pending batches are never eligible.
 func (s *Server) gc(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"removed": 0})
+	ttl := atoiDefault(r.URL.Query().Get("ttl"), 86400)
+	if ttl < 3600 || ttl > 365*86400 {
+		writeErr(w, 400, "暂存附件保留时间须在一小时至一年之间")
+		return
+	}
+	rows, err := s.m.pg.Query(`SELECT attachment_batch_id FROM tasks WHERE attachment_batch_id<>''`)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	protected := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			break
+		}
+		protected[id] = true
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	removed, err := s.artifactStore().CollectDrafts(time.Now().Add(-time.Duration(ttl)*time.Second), protected)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"removed": removed})
 }
 
 // --- utils ---

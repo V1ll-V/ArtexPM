@@ -128,13 +128,26 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
 	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
+	ctfMode := false
+	if ts != nil {
+		mode, _, _, _ := ts.TaskInputMetadata()
+		ctfMode = mode == "ctf"
+	}
+	if ctfMode {
+		sys = ctfGoalsSystem
+	}
+	inputs, inputErr := taskInputContext(dataDir, ts, taskID, 0)
+	if inputErr != nil {
+		return nil
+	}
+	sys += inputs
 	// set_constraints 始终可用(不依赖 asset store):正文已含「先抽操作约束再拆目标」这步
 	// (可在 agent 编辑页改措辞),这里只需接上工具。
 	tools := []actool.CoreTool{tsx.setGoals(), tsx.setConstraints()}
 	// Wire add_task_scope only when we have a real asset store + task to write to.
 	// The scope-extraction tail is appended in lockstep so the prompt never asks for
 	// a tool that isn't present.
-	if as != nil && taskID > 0 {
+	if as != nil && taskID > 0 && !ctfMode {
 		tools = append(tools, tsx.addTaskScope())
 		sys += goalsScopeTail
 	}

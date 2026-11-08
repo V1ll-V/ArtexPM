@@ -9,6 +9,9 @@ import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, Paus
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
+import { TaskAttachments } from "@/components/task-attachments";
+import { CTFToolStatusCard } from "@/components/ctf-tool-status";
+import { CTFReportTab } from "./_tabs/ctf-report-tab";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -51,6 +54,7 @@ import { RetestsTab } from "./_tabs/retests-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
 
 const TABS = [
+  { value: "artifacts", label: "附件与产物" },
   { value: "sessions", label: "会话" },
   { value: "overview", label: "总览" },
   { value: "graph", label: "探索链路" },
@@ -398,12 +402,17 @@ function TaskDetailInner() {
           </Button>
         </div>
         <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
+        {task.mode === "ctf" && (
+          <p className="text-xs text-muted-foreground">
+            CTF · {task.challenge_type === "reverse" ? "RE" : (task.challenge_type || "auto").toUpperCase()}
+          </p>
+        )}
         {/* Tabs */}
         <div className="no-scrollbar min-w-0 overflow-x-auto">
           <TabsList variant="default" className="min-w-max">
             {TABS.map((t) => (
               <TabsTrigger key={t.value} value={t.value}>
-                {t.label}
+                {t.value === "report" && task.mode === "ctf" ? "解题报告（WP）" : t.label}
                 {t.value === "intercept" && interceptPendingCount > 0 && (
                   <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-none text-white">
                     {interceptPendingCount > 99 ? "99+" : interceptPendingCount}
@@ -417,6 +426,10 @@ function TaskDetailInner() {
 
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
+        <TabsContent value="artifacts" className="mt-0">
+          <TaskAttachments taskId={id} readOnly={terminal} />
+            {task.mode === "ctf" && <CTFToolStatusCard />}
+        </TabsContent>
         <TabsContent value="sessions" className="mt-0">
           <SessionsTab taskId={id} />
         </TabsContent>
@@ -445,7 +458,7 @@ function TaskDetailInner() {
           <InterceptTab taskId={id} />
         </TabsContent>
         <TabsContent value="report" className="mt-0">
-          <ReportTab taskId={id} />
+            {task.mode === "ctf" ? <CTFReportTab taskId={id} onTaskUpdated={load} /> : <ReportTab taskId={id} />}
         </TabsContent>
       </div>
     </Tabs>

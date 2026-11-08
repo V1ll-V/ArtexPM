@@ -26,6 +26,10 @@ type goalSpec struct {
 //
 // 异步(goroutine)所以调用方立即返回,两条路径行为一致:秒建任务、后台拆目标。
 func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
+	if reason := s.taskInputsBlockReason(t); reason != "" {
+		log.Printf("[task] #%s 暂不启动：%s", t.ID, reason)
+		return
+	}
 	if !s.engine.beginTaskOperation(t.ID) {
 		return
 	}
@@ -108,9 +112,6 @@ func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
 }
 
 func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
-	if mode != "bootstrap" && s.engine.lifecycleReady != nil && !s.engine.lifecycleReady() {
-		return false, fmt.Errorf("验收生命周期尚未启用或配置未就绪；检查 /api/verification/readiness")
-	}
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
@@ -380,9 +381,9 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	if t == nil {
 		return nil
 	}
-	// Disabled instances can still prepare a task and retain the user's exact
-	// goal. They must not invoke an LLM even for the initial decomposition.
-	if s.engine.lifecycleReady != nil && !s.engine.lifecycleReady() {
+	// A task without an available execution model can still retain the exact
+	// goal. Optional finding/report automation does not control decomposition.
+	if !s.engine.ReadyFor(t) {
 		if text := strings.TrimSpace(t.Goal); text != "" {
 			if _, err := t.Store.AddGoal(map[string]any{"text": text}, "user"); err == nil {
 				return []goalSpec{{Text: text}}

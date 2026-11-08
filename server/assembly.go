@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -221,6 +222,13 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
 	}
+	repairCtx, cancelRepair := context.WithTimeout(context.Background(), 5*time.Second)
+	if n, err := pg.RepairNullToolProperties(repairCtx); err != nil {
+		log.Printf("[tools] repair null properties: %v", err)
+	} else if n > 0 {
+		log.Printf("[tools] repaired %d no-argument tool schemas", n)
+	}
+	cancelRepair()
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability
 	// is still gated by the global capture switch (hostTools() returns them only when

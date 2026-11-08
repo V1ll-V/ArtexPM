@@ -7,12 +7,14 @@ import type { ChatMention } from "@/lib/chat-mentions";
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
+  CTFToolStatus, CTFExecution, CTFCandidate, CTFWriteup, CTFProgress,
   ActiveFindingRetest,
   Activity,
   Agent,
   AgentDetail,
   AgentTrigger,
   ArchiveBatchItem,
+  ArtifactManifest,
   Asset,
   AssetInterceptRule,
   AssetInterceptRuleInput,
@@ -85,6 +87,7 @@ import type {
   Task,
   TaskArchive,
   TaskArchivePage,
+  TaskArtifact,
   TaskAssetMutation,
   TaskAssetScopeMutation,
   TaskCategory,
@@ -120,7 +123,7 @@ export async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, {
     ...init,
     headers: {
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(init?.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers as Record<string, string> | undefined),
     },
@@ -251,6 +254,9 @@ export const api = {
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
+    mode?: "pentest" | "ctf";
+    challengeType?: "auto" | "web" | "pwn" | "reverse";
+    attachmentBatchId?: string;
     name?: string;
     categoryId?: number;
     description: string;
@@ -265,6 +271,9 @@ export const api = {
     interceptRules?: AssetInterceptRuleInput[];
   }) =>
     post<Task>("/tasks", {
+      mode: input.mode ?? "pentest",
+      challenge_type: input.mode === "ctf" ? (input.challengeType ?? "auto") : "",
+      attachment_batch_id: input.attachmentBatchId ?? "",
       name: input.name ?? "",
       category_id: input.categoryId ?? null,
       description: input.description,
@@ -275,9 +284,44 @@ export const api = {
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
-      coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      coverage_enabled: input.coverageEnabled ?? input.mode !== "ctf",
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
     }),
+  createArtifactDraft: () => post<{ id: string }>("/task-upload-drafts", {}),
+  artifacts: (base: string) => get<ArtifactManifest>(base),
+  uploadArtifacts: (base: string, files: File[]) => {
+    const body = new FormData();
+    for (const file of files) body.append("file", file);
+    return http<ArtifactManifest>(base, { method: "POST", body });
+  },
+  editArtifact: (base: string, id: string, role: TaskArtifact["role"], remove = false) =>
+    patch<ArtifactManifest>(`${base}/${encodeURIComponent(id)}`, { role, remove }),
+  extractArtifact: (base: string, id: string) =>
+    post<ArtifactManifest>(`${base}/${encodeURIComponent(id)}/extract`, {}),
+  retryArtifactBind: (taskId: string) =>
+    post<ArtifactManifest>(`/tasks/${encodeURIComponent(taskId)}/artifacts/retry`, {}),
+  downloadArtifact: async (taskId: string, id: string) => {
+    const token = getToken();
+    const response = await fetch(
+      `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(id)}/download`,
+      {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      },
+    );
+    if (!response.ok) throw new Error("附件下载或完整性检查失败");
+    return response.blob();
+  },
+  ctfTools: () => get<CTFToolStatus>("/ctf/tools"),
+  ctfWP: (id: string, signal?: AbortSignal) => http<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp`, { signal }),
+  ctfEvidence: (id: string, signal?: AbortSignal) => http<{ executions: CTFExecution[]; candidates: CTFCandidate[]; progress?: CTFProgress }>(`/tasks/${encodeURIComponent(id)}/ctf/evidence`, { signal }),
+  decideCTFFlag: (task: string, candidate: CTFCandidate, state: "accepted" | "rejected", notes: string, completeTask = false) =>
+    post<CTFCandidate>(`/tasks/${encodeURIComponent(task)}/ctf/candidates/${candidate.id}`, { state, notes, revision: candidate.revision, complete_task: completeTask }),
+  ctfLog: async (task: string, execution: string, stream: "stdout" | "stderr") => {
+    const token = getToken();
+    const r = await fetch(`/api/tasks/${encodeURIComponent(task)}/ctf/executions/${encodeURIComponent(execution)}/log?stream=${stream}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!r.ok) throw new Error("日志下载或完整性检查失败");
+    return r.blob();
+  },
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),

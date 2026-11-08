@@ -7,6 +7,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -126,12 +127,21 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
+	ctx, base = ctfBase(ctx, m.workDir, ts, taskID, 0, base)
 	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
 	defer cleanup()
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
-	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
+	inputs, inputErr := taskInputContext(m.workDir, ts, taskID, 0)
+	if inputErr != nil {
+		return "", inputErr
+	}
+	sysBody := mainAgentSystem(goal, m.workDir, mainDir)
+	if isCTFContext(ctx) {
+		sysBody = fmt.Sprintf(ctfMainSystem, goal)
+	}
+	system, boundary := deferredSystem(sysBody+inputs, def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,
@@ -163,6 +173,17 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	if isCTFContext(ctx) {
+		gate := &ctfSubmissionProvider{Provider: opts.Provider, pg: ts.Database(), taskID: taskID}
+		if pending, err := ts.Database().PendingCTFSubmission(ctx, taskID); err != nil {
+			return "", err
+		} else if pending != nil {
+			gate.ignoreThroughID = pending.ID
+		}
+		opts.Provider = gate
+		opts.Hooks = ctfSubmissionHooks{gate: gate}
+		opts.Settlement = &harness.Settlement{Prompt: ctfSettlePrompt, MaxTurns: 1, DisabledTools: ctfExecutionTools}
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
 		opts.Transcript = m.tx

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +23,25 @@ import (
 
 func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(string, string, string) *httptest.ResponseRecorder) {
 	t.Helper()
+	// Report claims scan a global queue. Isolate this fixture from pending jobs
+	// created by other packages instead of claiming their report executions.
+	private := privateVerificationDB(t)
+	var schema string
+	if err := private.QueryRow(`SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	dsn, _, err := db.DSN()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := uri.Query()
+	query.Set("search_path", schema)
+	uri.RawQuery = query.Encode()
+	t.Setenv("ARTEX_PG_DSN", uri.String())
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Fatal(err)

@@ -665,7 +665,7 @@ export default function FindingsPage() {
       api
         .getFinding(fid)
         .then((full) =>
-          setReports((r) => ({ ...r, [key]: { status: "done", text: full.report ?? "", finding: full } })),
+          setReports((r) => ({ ...r, [key]: { status: "done", text: full.report || full.report_draft || "", finding: full } })),
         )
         .catch(() => setReports((r) => ({ ...r, [key]: { status: "error", text: "" } })));
     },

@@ -121,6 +121,9 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 			b.WriteString(rep)
 			b.WriteString("\n\n")
 		}
+		if strings.TrimSpace(f.Report) == "" {
+			b.WriteString(CandidateReport(f))
+		}
 		b.WriteString(findingTrafficMarkdown(f, false))
 		b.WriteString(findingReviewMarkdown(f))
 		b.WriteString("---\n\n")
@@ -157,6 +160,9 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		}
 		b.WriteString(rep)
 		b.WriteString("\n")
+	}
+	if strings.TrimSpace(f.Report) == "" {
+		b.WriteString(CandidateReport(f))
 	}
 	b.WriteString(findingTrafficMarkdown(f, true))
 	b.WriteString(findingReviewMarkdown(f))

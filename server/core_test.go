@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,25 @@ import (
 // TestCoreTaskLifecyclePG exercises the migrated core (tasks/exploration on PG)
 // through the real HTTP mux: create → goal nodes seeded → list → delete cascade.
 func TestCoreTaskLifecyclePG(t *testing.T) {
+	// This CRUD smoke test has no model. Do not inherit an active profile or
+	// Agent binding left by another test and accidentally start model retries.
+	private := privateVerificationDB(t)
+	var schema string
+	if err := private.QueryRow(`SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	dsn, _, err := db.DSN()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := uri.Query()
+	query.Set("search_path", schema)
+	uri.RawQuery = query.Encode()
+	t.Setenv("ARTEX_PG_DSN", uri.String())
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
