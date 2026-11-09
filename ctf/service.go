@@ -15,7 +15,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +60,33 @@ func executionLock(key string) func() {
 	return m.Unlock
 }
 
+func (s *Service) prepareSession(ctx context.Context, task, intent int64) (string, ctfrunner.Session, artifacts.Manifest, error) {
+	store := artifacts.Store{Root: s.Root}
+	m, err := store.Inputs(task, intent)
+	if err != nil {
+		return "", ctfrunner.Session{}, m, err
+	}
+	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: intent, InputHash: Hash(m)}
+	session, err := s.Runner.Prepare(ctx, spec)
+	if err != nil {
+		return "", session, m, err
+	}
+	key := spec.Key()
+	if !session.InputsReady {
+		if err = s.uploadInputs(ctx, key, task, m); err != nil {
+			return "", session, m, err
+		}
+	}
+	work := s.WorkDir(task, intent)
+	if err = os.MkdirAll(work, 0700); err != nil {
+		return "", session, m, err
+	}
+	if err = s.uploadWork(ctx, key, work); err != nil {
+		return "", session, m, err
+	}
+	return key, session, m, nil
+}
+
 func (s *Service) Execute(ctx context.Context, task, intent int64, command string, timeout int) (*db.CTFExecution, error) {
 	unlock := executionLock(fmt.Sprintf("%s/%d/%d", s.Root, task, intent))
 	defer unlock()
@@ -72,29 +98,11 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 	} else if pending != nil {
 		return nil, fmt.Errorf("已有候选 Flag 等待用户提交验证（候选 #%d）；自动探测已停止，请先在答案与验证中确认或否定", pending.ID)
 	}
+	key, session, m, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
 	store := artifacts.Store{Root: s.Root}
-	m, err := store.Inputs(task, intent)
-	if err != nil {
-		return nil, err
-	}
-	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: intent, InputHash: Hash(m)}
-	session, err := s.Runner.Prepare(ctx, spec)
-	if err != nil {
-		return nil, err
-	}
-	key := spec.Key()
-	if !session.InputsReady {
-		if err = s.uploadInputs(ctx, key, task, m); err != nil {
-			return nil, err
-		}
-	}
-	work := s.WorkDir(task, intent)
-	if err = os.MkdirAll(work, 0700); err != nil {
-		return nil, err
-	}
-	if err = s.uploadWork(ctx, key, work); err != nil {
-		return nil, err
-	}
 	// Legacy prompts and resumed conversations may still carry application paths.
 	for _, a := range m.Files {
 		p, e := store.InputPath(task, a)
@@ -103,7 +111,9 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 		}
 		command = strings.ReplaceAll(command, p, s.LogicalPath(a))
 	}
+	work := s.WorkDir(task, intent)
 	command = strings.ReplaceAll(command, work, "/work")
+	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: intent, InputHash: Hash(m)}
 	e := &db.CTFExecution{ID: uuid.NewString(), TaskID: task, IntentID: intent, InputHash: spec.InputHash, Command: command, ExitCode: -1, StartedAt: time.Now().UTC()}
 	e.Environment, _ = json.Marshal(map[string]any{"image": session.Image, "image_id": session.ImageID})
 	result, runErr := s.Runner.Execute(ctx, key, command, timeout)
@@ -159,7 +169,7 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 	if err = s.DB.SaveCTFExecution(saveCtx, e); err != nil {
 		return nil, err
 	}
-	for _, flag := range flagPattern.FindAllString(string(result.Stdout)+"\n"+string(result.Stderr), 32) {
+	for _, flag := range ExtractFlags(string(result.Stdout)+"\n"+string(result.Stderr), 32) {
 		if _, err = s.DB.AddCTFOutputCandidate(saveCtx, task, e.ID, flag); err != nil {
 			return nil, err
 		}
@@ -167,7 +177,162 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 	return e, nil
 }
 
-var flagPattern = regexp.MustCompile(`(?i)(?:flag|ctf|[a-z0-9_]{2,20}ctf)\{[^\r\n{}]{1,256}\}`)
+func (s *Service) StartJob(ctx context.Context, task, intent int64, command, jobID string) (*ctfrunner.JobInfo, error) {
+	unlock := executionLock(fmt.Sprintf("%s/%d/%d", s.Root, task, intent))
+	defer unlock()
+	if err := s.Sync(ctx, task); err != nil {
+		return nil, err
+	}
+	if pending, err := s.DB.PendingCTFSubmission(ctx, task); err != nil {
+		return nil, err
+	} else if pending != nil {
+		return nil, fmt.Errorf("已有候选 Flag 等待用户提交验证（候选 #%d）；自动探测已停止，请先在答案与验证中确认或否定", pending.ID)
+	}
+	key, session, m, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
+	store := artifacts.Store{Root: s.Root}
+	for _, a := range m.Files {
+		if p, e := store.InputPath(task, a); e == nil {
+			command = strings.ReplaceAll(command, p, s.LogicalPath(a))
+		}
+	}
+	work := s.WorkDir(task, intent)
+	command = strings.ReplaceAll(command, work, "/work")
+
+	execID := uuid.NewString()
+	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: intent, InputHash: Hash(m)}
+	e := &db.CTFExecution{
+		ID:        execID,
+		TaskID:    task,
+		IntentID:  intent,
+		InputHash: spec.InputHash,
+		Command:   "[bg: " + jobID + "] " + command,
+		ExitCode:  -1,
+		StartedAt: time.Now().UTC(),
+	}
+	e.Environment, _ = json.Marshal(map[string]any{"image": session.Image, "image_id": session.ImageID})
+	if err = s.DB.SaveCTFExecution(ctx, e); err != nil {
+		return nil, err
+	}
+
+	info, err := s.Runner.StartJob(ctx, key, command, jobID, execID)
+	if err != nil {
+		return nil, err
+	}
+	info.ExecID = execID
+	return info, nil
+}
+
+func (s *Service) ListJobs(ctx context.Context, task, intent int64) ([]ctfrunner.JobInfo, error) {
+	key, _, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
+	return s.Runner.ListJobs(ctx, key)
+}
+
+func (s *Service) JobStatus(ctx context.Context, task, intent int64, jobID string, tailLines int) (*ctfrunner.JobStatus, error) {
+	key, _, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
+	status, err := s.Runner.JobStatus(ctx, key, jobID, tailLines)
+	if err != nil {
+		return nil, err
+	}
+	combined := status.Stdout + "\n" + status.Stderr
+	for _, flag := range ExtractFlags(combined, 16) {
+		execID := status.ExecID
+		if execID == "" {
+			execID = status.ID
+		}
+		_, _ = s.DB.AddCTFOutputCandidate(ctx, task, execID, flag)
+	}
+	return status, nil
+}
+
+func (s *Service) StopJob(ctx context.Context, task, intent int64, jobID string) error {
+	key, _, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return err
+	}
+	return s.Runner.StopJob(ctx, key, jobID)
+}
+
+func (s *Service) StartInteractive(ctx context.Context, task, intent int64, command, sid string) (*ctfrunner.InteractiveSessionInfo, error) {
+	key, session, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
+	execID := uuid.NewString()
+	e := &db.CTFExecution{
+		ID:        execID,
+		TaskID:    task,
+		IntentID:  intent,
+		InputHash: session.Spec.InputHash,
+		Command:   "[interactive] " + command,
+		ExitCode:  -1,
+		StartedAt: time.Now().UTC(),
+	}
+	e.Environment, _ = json.Marshal(map[string]any{"image": session.Image, "image_id": session.ImageID, "interactive_sid": sid})
+	if err = s.DB.SaveCTFExecution(ctx, e); err != nil {
+		return nil, err
+	}
+
+	info, err := s.Runner.StartInteractive(ctx, key, command, sid, execID)
+	if err != nil {
+		return nil, err
+	}
+	info.ExecID = execID
+	return info, nil
+}
+
+func (s *Service) ListInteractive(ctx context.Context, task, intent int64) ([]ctfrunner.InteractiveSessionInfo, error) {
+	key, _, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
+	return s.Runner.ListInteractive(ctx, key)
+}
+
+func (s *Service) WriteInteractive(ctx context.Context, task, intent int64, sid, data, encoding string, autoNewline bool) (*ctfrunner.InteractiveWriteResult, error) {
+	key, _, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
+	return s.Runner.WriteInteractive(ctx, key, sid, data, encoding, autoNewline)
+}
+
+func (s *Service) ReadInteractive(ctx context.Context, task, intent int64, sid string, offset int64, waitMs int) (*ctfrunner.InteractiveReadResult, error) {
+	key, _, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.Runner.ReadInteractive(ctx, key, sid, offset, waitMs)
+	if err != nil {
+		return nil, err
+	}
+	if res.Output != "" {
+		execID := res.ExecID
+		if execID == "" {
+			execID = sid
+		}
+		for _, flag := range ExtractFlags(res.Output, 16) {
+			_, _ = s.DB.AddCTFOutputCandidate(ctx, task, execID, flag)
+		}
+	}
+	return res, nil
+}
+
+func (s *Service) CloseInteractive(ctx context.Context, task, intent int64, sid string) error {
+	key, _, _, err := s.prepareSession(ctx, task, intent)
+	if err != nil {
+		return err
+	}
+	return s.Runner.CloseInteractive(ctx, key, sid)
+}
 
 func excerpt(b []byte, n int) string {
 	if len(b) <= n {

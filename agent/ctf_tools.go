@@ -42,7 +42,7 @@ func ctfBase(ctx context.Context, root string, ts *db.ExplorationStore, task, in
 	return context.WithValue(ctx, ctfRunKey{}, true), out
 }
 
-var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binary_info", "ctf_gdb", "ctf_python", "ctf_decompile", "ctf_radare2", "Read", "LS", "ctf_tools"}
+var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binary_info", "ctf_gdb", "ctf_python", "ctf_decompile", "ctf_radare2", "Read", "LS", "ctf_tools", "ctf_run_background", "ctf_job_status", "ctf_job_stop", "ctf_probe_target", "ctf_session_start", "ctf_session_send", "ctf_session_read", "ctf_session_close"}
 
 func ctfCatalogTools() []actool.CoreTool {
 	out := []actool.CoreTool{}
@@ -137,9 +137,13 @@ func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
 			}
 			return "printf %s " + quote(base64.StdEncoding.EncodeToString([]byte(text(a, "script")))) + " | base64 -d > " + quote(name) + "\n" + python + " " + quote(name), num(a, "timeout_seconds", 120), nil
 		}),
-		commandTool("ctf_decompile", "使用 Ghidra headless 实际分析并反编译指定函数，保留输出。首次分析可能需要数分钟；函数名为空时取前 5 个函数。", obj(map[string]any{"path": str("二进制路径"), "function": str("函数名，可为空"), "limit": intp("最多 20 个函数")}, "path"), func(a map[string]json.RawMessage) (string, int, error) {
+		commandTool("ctf_decompile", "使用 Ghidra headless 实际分析并反编译指定函数，自动启用持久分析缓存以加速后续调用。函数名为空时取前 5 个函数。", obj(map[string]any{"path": str("二进制路径"), "function": str("函数名，可为空"), "limit": intp("最多 20 个函数")}, "path"), func(a map[string]json.RawMessage) (string, int, error) {
 			p, err := file(a)
-			return "mkdir -p /tmp/ghidra; analyzeHeadless /tmp/ghidra wp -import " + quote(p) + " -overwrite -analysisTimeoutPerFile 180 -scriptPath /opt/ctf/scripts -postScript ExportFunctions.java " + quote(text(a, "function")) + " " + fmt.Sprint(min(num(a, "limit", 5), 20)) + " -deleteProject", 300, err
+			limit := min(num(a, "limit", 5), 20)
+			fn := text(a, "function")
+			cmd := fmt.Sprintf(`h=$(sha256sum -- %s 2>/dev/null | cut -c1-12); [ -z "$h" ] && h="default"; pdir="/tmp/ghidra_$h"; bname=$(basename -- %s); if [ -f "$pdir/proj.gpr" ]; then analyzeHeadless "$pdir" proj -process "$bname" -noanalysis -scriptPath /opt/ctf/scripts -postScript ExportFunctions.java %s %d; else mkdir -p "$pdir"; analyzeHeadless "$pdir" proj -import %s -analysisTimeoutPerFile 180 -scriptPath /opt/ctf/scripts -postScript ExportFunctions.java %s %d; fi`,
+				quote(p), quote(p), quote(fn), limit, quote(p), quote(fn), limit)
+			return cmd, 300, err
 		}),
 		commandTool("ctf_radare2", "使用 radare2 执行实际静态分析命令，如 aaa;afl 或 pdf @ main。", obj(map[string]any{"path": str("二进制路径"), "commands": str("radare2 命令")}, "path", "commands"), func(a map[string]json.RawMessage) (string, int, error) {
 			p, err := file(a)
@@ -183,6 +187,191 @@ func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
 				return actool.Errorf(err.Error()), nil
 			}
 			return actool.Text(fmt.Sprintf("候选 #%d 已登记；尚未确认，请保留脚本与复现步骤。", id)), nil
+		}),
+		writeTool("ctf_run_background", "在独立容器中启动后台长任务（如耗时暴破、深度 Ghidra 反编译、长时间 fuzz 或解题计算），不受 300 秒单次执行超时限制。返回 job_id，后续可通过 ctf_job_status 轮询进展与日志，通过 ctf_job_stop 终止。", obj(map[string]any{
+			"command": str("要在后台运行的 Bash 命令"),
+			"job_id":  str("任务自定义英文标识（可选，如 crack_zip、ghidra_deep）"),
+		}, "command"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			cmd := text(a, "command")
+			if strings.TrimSpace(cmd) == "" {
+				return actool.Errorf("command 不能为空"), nil
+			}
+			jobID := text(a, "job_id")
+			info, err := s.StartJob(ctx, task, intent, cmd, jobID)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			b, _ := json.Marshal(info)
+			return actool.Text(string(b)), nil
+		}),
+		readTool("ctf_job_status", "查询后台长任务状态（running / finished / failed / terminated）、退出码及最新输出日志。输出中的 Flag 同样会自动捕获登记为候选。job_id 为空时列出全部后台任务。", obj(map[string]any{
+			"job_id":     str("任务标识；若为空则返回所有后台任务列表"),
+			"tail_lines": intp("读取日志尾部行数，默认 100，最多 1000"),
+		}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			jobID := text(a, "job_id")
+			if strings.TrimSpace(jobID) == "" {
+				list, err := s.ListJobs(ctx, task, intent)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				b, _ := json.Marshal(list)
+				return actool.Text(string(b)), nil
+			}
+			tail := num(a, "tail_lines", 100)
+			status, err := s.JobStatus(ctx, task, intent, jobID, tail)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			b, _ := json.Marshal(status)
+			return actool.Text(string(b)), nil
+		}),
+		writeTool("ctf_job_stop", "终止正在运行的后台长任务。", obj(map[string]any{
+			"job_id": str("任务标识"),
+		}, "job_id"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			jobID := text(a, "job_id")
+			if strings.TrimSpace(jobID) == "" {
+				return actool.Errorf("缺少 job_id"), nil
+			}
+			err := s.StopJob(ctx, task, intent, jobID)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("后台任务 %s 已终止", jobID)), nil
+		}),
+		readTool("ctf_probe_target", "对远程靶机进行网络与协议探测（连通性测试、延迟测定、Banner 抓取、TLS/HTTP 协议识别、Proof-of-Work 挑战检测及交互菜单识别）。支持 'nc 1.2.3.4 9999'、'1.2.3.4:9999'、'http://...' 等格式。连接远程靶机前建议先探测。", obj(map[string]any{
+			"target":          str("靶机目标，如 10.10.10.1:9999、nc 10.10.10.1 9999 或 http://10.10.10.1:8080/"),
+			"timeout_seconds": intp("探测超时秒数，默认 10，最多 30"),
+		}, "target"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			target := text(a, "target")
+			if strings.TrimSpace(target) == "" {
+				return actool.Errorf("target 不能为空"), nil
+			}
+			timeout := min(num(a, "timeout_seconds", 10), 30)
+			cmd := fmt.Sprintf("if [ -f /opt/ctf/scripts/probe_target.py ]; then python3 /opt/ctf/scripts/probe_target.py %s --json --timeout=%d; else python3 -c %s %s --timeout=%d; fi",
+				quote(target), timeout, quote(ctf.ProbeTargetScript), quote(target), timeout)
+			e, err := s.Execute(ctx, task, intent, cmd, timeout+10)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if e.ExitCode != 0 && e.Error != "" {
+				return actool.Errorf(fmt.Sprintf("%s: %s", e.Error, e.StderrExcerpt)), nil
+			}
+			return actool.Text(e.StdoutExcerpt), nil
+		}),
+		writeTool("ctf_session_start", "启动持久交互终端会话（PTY 伪终端模式），适用于需要多轮交互的 CTF 题目（如 nc 远程靶机、带菜单的本地 Pwn 程序、gdb 交互等）。启动后使用 ctf_session_send 发送输入，使用 ctf_session_read 接收输出。", obj(map[string]any{
+			"command":    str("启动命令，如 'nc 10.10.10.1 9999' 或 './vuln'"),
+			"session_id": str("会话标识（可选，如 pty1、remote_nc）"),
+		}, "command"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			cmd := text(a, "command")
+			if strings.TrimSpace(cmd) == "" {
+				return actool.Errorf("command 不能为空"), nil
+			}
+			sid := text(a, "session_id")
+			info, err := s.StartInteractive(ctx, task, intent, cmd, sid)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			b, _ := json.Marshal(info)
+			return actool.Text(string(b)), nil
+		}),
+		writeTool("ctf_session_send", "向正在运行的持久交互会话发送输入数据（如菜单选择编号、用户名、ROP payload 等）。", obj(map[string]any{
+			"session_id":   str("会话标识"),
+			"data":         str("要发送的数据文本（若为二进制 payload 请设 encoding 为 base64）"),
+			"encoding":     str("编码格式：'utf-8' 或 'base64'，默认 utf-8"),
+			"auto_newline": map[string]any{"type": "boolean", "description": "是否自动在末尾追加回车换行符 \\n，默认 true"},
+		}, "session_id", "data"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			sid := text(a, "session_id")
+			data := text(a, "data")
+			encoding := text(a, "encoding")
+			if encoding == "" {
+				encoding = "utf-8"
+			}
+			autoNL := true
+			if v, ok := a["auto_newline"]; ok {
+				_ = json.Unmarshal(v, &autoNL)
+			}
+			res, err := s.WriteInteractive(ctx, task, intent, sid, data, encoding, autoNL)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			b, _ := json.Marshal(res)
+			return actool.Text(string(b)), nil
+		}),
+		readTool("ctf_session_read", "读取持久交互会话的增量输出内容。输出中的 Flag 会自动捕获登记为候选。session_id 为空时列出所有交互会话。", obj(map[string]any{
+			"session_id": str("会话标识；为空时列出所有活跃会话"),
+			"offset":     intp("从输出日志的字节偏移量开始读取，默认 0；多轮读取时请传入上一次返回的 offset 以获取增量"),
+			"wait_ms":    intp("等待输出的最长毫秒数（100~10000），默认 1000"),
+		}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			sid := text(a, "session_id")
+			if strings.TrimSpace(sid) == "" {
+				list, err := s.ListInteractive(ctx, task, intent)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				b, _ := json.Marshal(list)
+				return actool.Text(string(b)), nil
+			}
+			offset := int64(num(a, "offset", 0))
+			waitMs := num(a, "wait_ms", 1000)
+			res, err := s.ReadInteractive(ctx, task, intent, sid, offset, waitMs)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			b, _ := json.Marshal(res)
+			return actool.Text(string(b)), nil
+		}),
+		writeTool("ctf_session_close", "终止并关闭指定的持久交互会话。", obj(map[string]any{
+			"session_id": str("要关闭的会话标识"),
+		}, "session_id"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			sid := text(a, "session_id")
+			if strings.TrimSpace(sid) == "" {
+				return actool.Errorf("缺少 session_id"), nil
+			}
+			err := s.CloseInteractive(ctx, task, intent, sid)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("交互会话 %s 已关闭", sid)), nil
 		}),
 	}
 	// File tools use the same container and evidence recorder as Bash. No local
@@ -231,6 +420,9 @@ func ctfPrompt(root string, task, intent int64) string {
 【CTF 专用流程：取得候选 → 交给用户提交验证】
 Bash 和文件工具只在独立容器 /work 执行；脚本写在 /work。应用目录 %s 仅为归档路径。
 Web 优先 ctf_http；Pwn/RE 按需选择静态分析、调试或求解脚本。仅工具缺失或异常时使用 ctf_tools 体检，不要每轮重复检查环境。
+远程靶机访问：在连接远程靶机（如 nc 1.2.3.4 9999 或 http 端口）前，先使用 ctf_probe_target 探测连通性、RTT、初始 Banner、TLS 以及是否有 Proof-of-Work (PoW) 校验。
+多轮交互挑战：对于需要交互菜单选择、多轮 stdin 输入或动态交互的靶机/本地程序，请使用 ctf_session_start 启动持久 PTY 会话，使用 ctf_session_send 发送多轮输入，使用 ctf_session_read 接收输出（输出中的 Flag 同样会自动提取并登记候选），结束时调用 ctf_session_close。
+长耗时任务（如大型程序 Ghidra 反编译、密码字典暴破、全路径符号执行等预计超过 2 分钟的任务）请使用 ctf_run_background 后台运行，并用 ctf_job_status 轮询结果与日志，避免单个命令超时。
 执行自动保存命令、输出、脚本及 execution_id，常见 Flag 自动登记候选；非标准答案才需 ctf_submit_flag，且必须来自真实执行输出。
 一旦出现候选，立即停止探测、重复 payload、资产扩展、漏洞报告和目标证明；只交付候选值、来源执行和一句解法摘要，等待用户提交题目平台验证。WP 无需额外模型整理。
 候选不是正确答案：用户确认后才引用已确认记录证明对应最终目标；用户否定后按反馈继续，避免再次提交同一被否定答案。

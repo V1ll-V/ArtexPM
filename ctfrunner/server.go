@@ -154,6 +154,15 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("PUT /sessions/{id}/inputs", func(w http.ResponseWriter, r *http.Request) { s.putFiles(w, r, true) })
 	mux.HandleFunc("PUT /sessions/{id}/work", func(w http.ResponseWriter, r *http.Request) { s.putFiles(w, r, false) })
+	mux.HandleFunc("POST /sessions/{id}/jobs", s.startJob)
+	mux.HandleFunc("GET /sessions/{id}/jobs", s.listJobs)
+	mux.HandleFunc("GET /sessions/{id}/jobs/{job_id}", s.getJob)
+	mux.HandleFunc("DELETE /sessions/{id}/jobs/{job_id}", s.stopJob)
+	mux.HandleFunc("POST /sessions/{id}/interactive", s.startInteractive)
+	mux.HandleFunc("GET /sessions/{id}/interactive", s.listInteractive)
+	mux.HandleFunc("POST /sessions/{id}/interactive/{sid}/write", s.writeInteractive)
+	mux.HandleFunc("GET /sessions/{id}/interactive/{sid}/read", s.readInteractive)
+	mux.HandleFunc("DELETE /sessions/{id}/interactive/{sid}", s.closeInteractive)
 	mux.HandleFunc("POST /sessions/{id}/exec", func(w http.ResponseWriter, r *http.Request) {
 		key := r.PathValue("id")
 		unlock := s.lock(key)
@@ -179,9 +188,16 @@ func (s *Server) Handler() http.Handler {
 			in.Timeout = 120
 		}
 		timeout := min(max(in.Timeout, 1), 300)
-		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeout)*time.Second)
+		// 容器内 timeout 先终止命令进程组；外层 context 多留 15 秒仅作兜底。
+		// 这样超时不会杀掉整个工具容器，后台进程、/tmp 与 /work 内文件得以保留。
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeout+15)*time.Second)
 		defer cancel()
-		result, err := s.Engine.Exec(ctx, v.ContainerID, in.Command)
+		result, err := s.Engine.Exec(ctx, v.ContainerID, wrapTimeout(in.Command, timeout))
+		if err == nil && result.ExitCode == 124 {
+			result.Error = fmt.Sprintf("command timed out after %d seconds", timeout)
+			note := fmt.Sprintf("\n[ARTEX] 命令超过 %d 秒已被终止（退出码 124）；容器与工作文件保留。长任务请改为后台运行（nohup ... &）并轮询日志。\n", timeout)
+			result.Stderr = append(result.Stderr, note...)
+		}
 		if err != nil {
 			result.Error = err.Error()
 		}
@@ -342,7 +358,7 @@ func copyWorkspace(w io.Writer, r io.Reader) error {
 			return err
 		}
 		name := strings.TrimPrefix(h.Name, "work/")
-		if name == "work" || name == "." || name == ".inputs" || strings.HasPrefix(name, ".inputs/") || name == ".cache" || strings.HasPrefix(name, ".cache/") || name == ".ghidra" || strings.HasPrefix(name, ".ghidra/") {
+		if name == "work" || name == "." || name == ".inputs" || strings.HasPrefix(name, ".inputs/") || name == ".cache" || strings.HasPrefix(name, ".cache/") || name == ".ghidra" || strings.HasPrefix(name, ".ghidra/") || name == ".jobs" || strings.HasPrefix(name, ".jobs/") || name == ".interactive" || strings.HasPrefix(name, ".interactive/") {
 			continue
 		}
 		if !safeRelative(name) || (h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir) {

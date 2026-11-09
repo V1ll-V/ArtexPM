@@ -17,7 +17,7 @@ func main() {
 	}
 	image := os.Getenv("ARTEX_CTF_TOOL_IMAGE")
 	if image == "" {
-		image = "autumn27/artex-ctf-tools:20261107"
+		image = "autumn27/artex-ctf-tools:20261109"
 	}
 	s := &ctfrunner.Server{Engine: ctfrunner.DockerEngine("/var/run/docker.sock", image), Token: token, StateDir: "/state"}
 	go func() {

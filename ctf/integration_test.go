@@ -43,7 +43,7 @@ func TestPwnREExecutionEvidenceWPAndArchive(t *testing.T) {
 	runner := &ctfrunner.Client{URL: os.Getenv("ARTEX_CTF_TEST_RUNNER_URL"), Token: os.Getenv("ARTEX_CTF_TEST_RUNNER_TOKEN")}
 	var engine *ctfrunner.Engine
 	if runner.URL == "" {
-		engine = ctfrunner.DockerEngine("/var/run/docker.sock", "autumn27/artex-ctf-tools:20261107")
+		engine = ctfrunner.DockerEngine("/var/run/docker.sock", "autumn27/artex-ctf-tools:20261109")
 		controller := &ctfrunner.Server{Engine: engine, Token: strings.Repeat("test-", 8), StateDir: t.TempDir()}
 		httpServer := httptest.NewServer(controller.Handler())
 		defer httpServer.Close()

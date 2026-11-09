@@ -33,7 +33,17 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 Planner、Goals 和 MainAgent 读取当前附件清单，Worker 按意图固定输入快照，续跑保留原版本。附件与快照随原有任务目录归档恢复。旧版对话上传入口继续兼容；新建任务不再依赖将附件绝对路径写入描述。
 
-CTF 任务的 Bash、文件操作和专用分析工具通过独立 `ctf-runner` 执行，工具镜像包含 GDB、pwntools、ROPgadget、ropper、one_gadget、pwninit、Ghidra、radare2、angr、Z3、Unicorn、Keystone 和 QEMU。应用与工具容器不挂载 Docker socket；只有执行器控制 Docker。每个任务/意图使用独立工作卷，原始附件只读，工具容器使用非 root 用户、只读根文件系统、3 GiB 内存、2 CPU、256 进程和最多 300 秒命令超时。工具状态卡片会实际执行命令、导入 Python 模块并显示版本。现有任务执行及验收启用条件继续适用；CTF 模式缺省关闭资产覆盖度展示。
+CTF 任务的 Bash、文件操作和专用分析工具通过独立 `ctf-runner` 执行，工具镜像包含：
+- **Pwn / 二进制**：GDB、pwntools、ROPgadget、ropper、one_gadget、pwninit、seccomp-tools、patchelf、checksec、file、binutils。
+- **逆向工程**：Ghidra (12.1.4 Headless)、radare2、angr / claripy、Z3、Unicorn、Keystone、QEMU user、UPX。
+- **密码学 / 数学**：PyCryptodome、gmpy2、sympy、numpy、Pillow。
+- **取证与隐写**：binwalk、tshark、exiftool、steghide、7z、foremost。
+
+应用与工具容器不挂载 Docker socket；只有执行器控制 Docker。每个任务/意图使用独立工作卷，原始附件只读，工具容器使用非 root 用户、只读根文件系统、3 GiB 内存、2 CPU、256 进程和最多 300 秒命令超时。命令超时通过容器内 `timeout -k 3` 限时，仅终止当前命令进程组并返回退出码 124，**不销毁工具容器**，临时目录与工作区文件完整保留。工具状态卡片会实际执行命令、导入 Python 模块并显示版本（共 33 项就绪状态）。现有任务执行及验收启用条件继续适用；CTF 模式缺省关闭资产覆盖度展示。
+
+在 `data/ctf-preview.env` 或系统环境中可通过 `ARTEX_CTF_FLAG_PREFIXES` 自定义全局比赛 Flag 前缀（如 `hgame,DASCTF,moectf,geek` 等，逗号分隔），内置已覆盖 `flag{`、`ctf{` 及 `*ctf{`。系统在输出文本及 Base64 / Hex 编码内容中均会自动捕获并解码登记候选 Flag。
+
+遇到标准 UPX 壳时，可在 CTF 的 Bash 中用 `upx -t "$input"` 检查附件，再用 `upx -d -o /work/unpacked "$input"` 把解包结果写入工作目录。`$input` 为附件清单中的路径。已创建的意图容器继续使用创建时的镜像，新意图会使用更新后的工具镜像。
 
 命令、退出码、输出摘要、完整日志摘要及求解脚本会保留为执行证据。输出中匹配的 Flag 仅登记为候选，用户在任务的“解题报告（WP）”页确认后，才能作为目标完成依据；也可否定并撤销确认。更新附件会使旧输入的候选过期。WP 按已有事实、真实命令、日志和脚本生成，可复制或下载 Markdown；未确认答案时明确标为阶段报告，不会补造成功步骤。归档格式 5 保存执行与候选记录，文件包保存附件、日志、脚本及 WP，并兼容恢复格式 1–4。
 
@@ -43,11 +53,13 @@ CTF 使用专用的目标拆解、规划、执行和交互提示词，不套用�
 
 Web 题可使用 `ctf_http` 在同一独立容器中发送 HTTP/HTTPS 请求，支持查询参数、表单、请求头、原始正文及意图内 Cookie。响应头、正文、状态码和最终 URL 会留存为执行证据，真实输出中的 Flag 进入候选流程。默认不跟随重定向，显式允许后最多跟随 3 次；正文上限 64 KiB、响应上限 8 MiB、请求超时最多 120 秒。连接失败时不会复用上次响应作为新证据。模型可以用 `ctf_status` 查询当前输入版本、执行次数及答案状态，规划和续跑上下文也会带入最新候选，减少重复求解或重复登记。
 
+远程靶机探测与交互：遇到远程靶机题目（如 Pwn、Web 或带 Proof-of-Work 校验的比赛靶机）时，Agent 可通过 `ctf_probe_target` 工具（或在 Bash 中直接执行 `ctf-probe`）快速探测目标连通性、RTT 延迟、初始 Banner、TLS 支持与 HTTP 状态，并自动识别 PoW 防爆破挑战（如 sha256/md5/hashcash）与交互式菜单，给出即用型 pwntools (`remote('host', port)`) / nc 连线建议。对于需要多轮命令与输入交互的题目，可通过 `ctf_session_start` 建立持续的 PTY 伪终端会话，使用 `ctf_session_send` 连续投递多轮输入，使用 `ctf_session_read` 增量长轮询读取回显（流式输出中的 Flag 同样会自动识别提取并登记为候选），结束后调用 `ctf_session_close` 优雅关闭。耗时较长的大任务亦可通过 `ctf_run_background` 异步后台运行并用 `ctf_job_status` 轮询进度，避免单次命令超时限制。
+
 WP 页面在可见时每 5 秒自动更新，切换到后台后暂停刷新。页面分别展示“正在解题”“等待确认答案”“答案已确认”和任务停止状态，标出旧输入版本与截断输出；答案确认状态与任务是否完成分别展示。确认操作和切换任务时会取消旧的刷新请求，防止旧数据覆盖新状态。
 
 上传草稿由服务端生成批次 ID；`POST /api/gc?ttl=86400` 可清理超过一天的未绑定草稿，数据库引用的待绑定批次受到保护。文件与版本清单位于任务目录，数据库保存任务模式、题型和绑定批次，便于沿用已有归档文件事务。
 
-CTF 预览使用应用镜像 `autumn27/artex:v0.5.0`、执行器镜像 `autumn27/artex-ctf-runner:20261107` 和工具镜像 `autumn27/artex-ctf-tools:20261107`。`docker-compose.ctf-preview.yml` 使用项目名 `artex-ctf-preview`，访问 `http://localhost:8789`；它有独立数据库、数据卷、技能卷和执行器状态卷，首次进入需设置密码及模型。当前机器的预览配置保存在不纳入 Git 的 `data/ctf-preview.env`，包含数据库密码和至少 24 字符的随机 `ARTEX_CTF_RUNNER_TOKEN`。应用通过 `ARTEX_CTF_RUNNER_URL` 和相同令牌连接内部执行器；执行器不对宿主机发布端口。可用下列命令管理：
+CTF 预览使用应用镜像 `autumn27/artex:v0.5.0`、执行器镜像 `autumn27/artex-ctf-runner:20261109` 和工具镜像 `autumn27/artex-ctf-tools:20261109`。`docker-compose.ctf-preview.yml` 使用项目名 `artex-ctf-preview`，访问 `http://localhost:8789`；它有独立数据库、数据卷、技能卷和执行器状态卷，首次进入需设置密码及模型。当前机器的预览配置保存在不纳入 Git 的 `data/ctf-preview.env`，包含数据库密码和至少 24 字符的随机 `ARTEX_CTF_RUNNER_TOKEN`。应用通过 `ARTEX_CTF_RUNNER_URL` 和相同令牌连接内部执行器；执行器不对宿主机发布端口。可用下列命令管理：
 
 ```powershell
 docker compose --env-file data/ctf-preview.env -p artex-ctf-preview -f docker-compose.ctf-preview.yml up -d --pull never
@@ -57,13 +69,13 @@ docker compose --env-file data/ctf-preview.env -p artex-ctf-preview -f docker-co
 本地构建时先按下文生成嵌入前端的应用二进制，再构建应用镜像；执行器单独编译为 Linux amd64 二进制：
 
 ```sh
-docker build -f Dockerfile.ctf-tools -t autumn27/artex-ctf-tools:20261107 .
+docker build -f Dockerfile.ctf-tools -t autumn27/artex-ctf-tools:20261109 .
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/amd64/ctf-runner ./cmd/ctf-runner
-docker build -f Dockerfile.ctf-runner -t autumn27/artex-ctf-runner:20261107 .
+docker build -f Dockerfile.ctf-runner -t autumn27/artex-ctf-runner:20261109 .
 docker build -t autumn27/artex:v0.5.0 .
 ```
 
-Windows 下可在 `web` 中使用 `$env:NEXT_EXPORT='1'; npm run build -- --webpack` 完成静态构建。真实样例集成测试为 `ctf/TestPwnREExecutionEvidenceWPAndArchive`，需设置测试专用的 `ARTEX_PG_DSN` 和 `ARTEX_CTF_DOCKER_TEST=1`。推荐通过 `ARTEX_CTF_TEST_RUNNER_URL` / `ARTEX_CTF_TEST_RUNNER_TOKEN` 连接单独执行器，使测试进程无需 Docker socket。测试会编译本地合成题目，覆盖 GDB 断点、Ghidra 反编译、pwntools 求解、angr/Claripy、候选确认、WP 缓存、归档恢复和超时续跑。
+Windows 下可在 `web` 中使用 `$env:NEXT_EXPORT='1'; npm run build -- --webpack` 完成静态构建。`ctf_decompile` 按二进制 SHA-256 在容器 `/tmp/ghidra_<hash>` 建立持久工程，二次反编译自动启用 `-noanalysis` 跳过重复导入与全量分析。真实样例集成测试为 `ctf/TestPwnREExecutionEvidenceWPAndArchive` 与跨领域基准套件 `ctf/TestCTFBenchmarkSuite`（及 12 题端到端基准脚本 `benchmarks/run_benchmark.py`，覆盖 Crypto / Reverse / Pwn / Forensics / Web），需设置测试专用的 `ARTEX_PG_DSN` 和 `ARTEX_CTF_DOCKER_TEST=1`。推荐通过 `ARTEX_CTF_TEST_RUNNER_URL` / `ARTEX_CTF_TEST_RUNNER_TOKEN` 连接单独执行器，使测试进程无需 Docker socket。测试会编译本地合成题目，覆盖 GDB 断点、Ghidra 反编译、pwntools 求解、angr/Claripy、候选确认、WP 缓存、归档恢复和超时续跑。
 
 Go 数据库测试使用专用空库。重复运行多包测试时应按包隔离数据库，避免全局队列、企业范围和资产归属记录相互影响；迁移测试需要默认 `public` schema，调用记录相关测试还需要初始化 `llm_records` / `llm_usage` 运行表。
 

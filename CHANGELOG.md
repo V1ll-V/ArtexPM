@@ -2,6 +2,38 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.1] - 2026-11-09
+
+### 新增与优化
+
+- **CTF 自动化基准测试套件与 Ghidra 反编译缓存优化（节点 R3）**：
+  - **12 道跨学科 CTF 自动化基准套件（`benchmarks/run_benchmark.py` / `ctf/TestCTFBenchmarkSuite`）**：覆盖 Crypto（RSA 低指数、仿射模逆、密钥流异或）、Reverse（ELF 反混淆、UPX 脱壳、Z3 约束求解）、Pwn（ret2win 栈溢出、PTY 菜单多轮交互、远程 PoW 靶机）、Forensics（EXIF 元数据提取、foremost+7z 固件雕刻）及 Web（HTTP Header/Cookie 绕过），支持会话结束后自动销毁测试容器。
+  - **Ghidra Headless 持久化分析缓存（`ctf_decompile`）**：按目标二进制 SHA-256 在容器 `/tmp/ghidra_<hash>` 建立持久工程，首次导入分析后，后续反编译不同函数自动使用 `-process <bin> -noanalysis` 跳过重复导入与全量自动分析，且缓存不混入 `/work` 工作区归档。
+- **远程靶机探测与交互会话体系（节点 R2）**：
+  - **远程靶机连通性与协议探测器（`ctf_probe_target` / `ctf-probe`）**：
+    - 支持灵活解析常见靶机格式（`nc <host> <port>`、`<host>:<port>`、`http(s)://...`）。
+    - 快速测定 DNS 解析耗时、TCP 握手 RTT（毫秒级 Ping）、TLS/SSL 自动识别、HTTP 协议状态与 Server/Title 提取。
+    - 自动检测 Proof-of-Work（PoW）防爆破挑战特征（支持 `sha256(xxxx + ??) == yyyy`、`md5(...)`、`hashcash` 等常见 CTF 防爆破模式）。
+    - 自动识别交互菜单（`1. ... 2. ... Choice:`）与输入 Prompt。
+    - 自动生成即用型 pwntools (`remote('host', port, ssl=True)`)、nc 与 curl 命令建议。
+  - **持久交互式终端 PTY 会话体系（`ctf_session_*`）**：
+    - 在执行器层实现基于 Linux PTY（伪终端）的守护进程管理器，全面覆盖多轮交互型 CTF 挑战（Pwn 菜单交互、远程 shell 交互、gdb 动态调试等）。
+    - 提供 `ctf_session_start`（创建 PTY 会话）、`ctf_session_send`（多轮输入投递，支持 utf-8/base64 与换行自动补齐）、`ctf_session_read`（基于文件偏移量的非阻塞/增量长轮询输出读取）、`ctf_session_close`（会话终止与进程组优雅退出）。
+    - 交互会话产生的所有增量输出均自动接入 Flag 提取器（`ExtractFlags`），流式吐出的 Flag 自动捕获并关联 `execution_id` 登记至 `ctf_candidates` 数据库候选表。
+- **后台异步长任务与日志轮询机制（节点 R1）**：
+  - 新增 `ctf_run_background`、`ctf_job_status`、`ctf_job_stop` 工具，突破 300 秒单次执行超时上限。
+  - 后台长任务输出自动提取并登记 Flag 候选。
+- **Flag 候选自动识别增强**：
+  - 新增环境变量 `ARTEX_CTF_FLAG_PREFIXES`，支持自定义全局比赛 Flag 前缀（如 `hgame,DASCTF,moectf` 等，逗号分隔），自动忽略非法字符。
+  - 新增输出内容中 Base64 和 Hex 编码串的自动捕获与解码，若解码后符合 Flag 格式则自动登记为候选，普通编码字符串不被误判。
+- **命令超时容器保护机制**：
+  - 工具命令超时改由容器内 `timeout -k 3` 控制，超时仅终止命令进程组并返回标准退出码 124 与友好提示，**不再销毁工具容器**；临时文件、调试环境和工作区文件完整保留。
+- **CTF 工具链扩展（密码学与取证）**：
+  - 新增密码学与数学库：`pycryptodome` (4.4.0)、`gmpy2` (2.3.2)、`sympy` (1.14.0)、`numpy` (2.5.4)、`pillow` (13.0.0)。
+  - 新增取证与隐写工具：`binwalk` (2.4.3)、`exiftool` (13.25)、`tshark` (4.4.19)、`steghide` (0.5.1)、`p7zip-full` (25.01)、`foremost`。
+  - 新增二进制与漏洞工具：`seccomp-tools` (1.7.1)、`UPX` (4.2.4)。
+  - 更新诊断脚本与前端工具卡片，展示 33 项安全工具就绪状态（涵盖 Pwn / RE / Crypto / Forensics）。
+
 ## [0.5.0] - 2026-11-08
 
 - 新增 CTF 任务、附件识别与 ZIP 解压、独立 Pwn/RE 执行器、执行证据和 WP；归档格式 5 保留执行与答案记录。

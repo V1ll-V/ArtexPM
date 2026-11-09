@@ -16,10 +16,18 @@ for name, group, args in [
     ("ropper","pwn",["/opt/ctf/pwn/bin/ropper","--version"]), ("one_gadget","pwn",["one_gadget","--version"]),
     ("pwninit","pwn",["pwninit","--version"]), ("radare2","reverse",["r2","-v"]),
     ("patchelf","pwn",["patchelf","--version"]), ("QEMU user","reverse",["qemu-x86_64","--version"]),
+    ("UPX","reverse",["upx","--version"]),
+    ("seccomp-tools","pwn",["seccomp-tools","--version"]),
+    ("exiftool","forensics",["exiftool","-ver"]),
+    ("tshark","forensics",["tshark","-v"]),
     ("Ghidra / Java","reverse",["bash","-c","test -f /opt/ctf/ghidra_12.1.4_PUBLIC/Ghidra/application.properties && grep application.version /opt/ctf/ghidra_12.1.4_PUBLIC/Ghidra/application.properties && java -version"]),
 ]: items.append(probe(name,group,args))
-distributions=dict(pwnlib="pwntools",keystone="keystone-engine",z3="z3-solver",claripy="angr")
-for group, modules, python in [("pwn",["pwnlib","capstone","unicorn","keystone","r2pipe","z3"],"/opt/ctf/pwn/bin/python"),("reverse",["angr","claripy","capstone","unicorn","keystone","z3"],"/opt/ctf/re/bin/python")]:
+distributions=dict(pwnlib="pwntools",keystone="keystone-engine",z3="z3-solver",claripy="angr",Crypto="pycryptodome",PIL="pillow")
+for group, modules, python in [
+    ("pwn",["pwnlib","capstone","unicorn","keystone","r2pipe","z3"],"/opt/ctf/pwn/bin/python"),
+    ("crypto",["Crypto","gmpy2","sympy","numpy","PIL"],"/opt/ctf/pwn/bin/python"),
+    ("reverse",["angr","claripy","capstone","unicorn","keystone","z3"],"/opt/ctf/re/bin/python")
+]:
     for module in modules:
         imp="from angr import claripy" if module=="claripy" else f"import {module}"
         dist=distributions.get(module,module)

@@ -94,3 +94,77 @@ func (c *Client) Download(ctx context.Context, key string) (io.ReadCloser, error
 	}
 	return res.Body, nil
 }
+func (c *Client) Delete(ctx context.Context, key string) error {
+	res, err := c.request(ctx, "DELETE", "/sessions/"+key, nil, "")
+	if err == nil {
+		res.Body.Close()
+	}
+	return err
+}
+
+func (c *Client) StartJob(ctx context.Context, key, command, jobID, execID string) (*JobInfo, error) {
+	var out JobInfo
+	err := c.json(ctx, "POST", "/sessions/"+key+"/jobs", map[string]string{"command": command, "job_id": jobID, "exec_id": execID}, &out)
+	return &out, err
+}
+
+func (c *Client) ListJobs(ctx context.Context, key string) ([]JobInfo, error) {
+	var out []JobInfo
+	err := c.json(ctx, "GET", "/sessions/"+key+"/jobs", nil, &out)
+	return out, err
+}
+
+func (c *Client) JobStatus(ctx context.Context, key, jobID string, tailLines int) (*JobStatus, error) {
+	var out JobStatus
+	path := "/sessions/" + key + "/jobs/" + jobID
+	if tailLines > 0 {
+		path += fmt.Sprintf("?tail=%d", tailLines)
+	}
+	err := c.json(ctx, "GET", path, nil, &out)
+	return &out, err
+}
+
+func (c *Client) StopJob(ctx context.Context, key, jobID string) error {
+	res, err := c.request(ctx, "DELETE", "/sessions/"+key+"/jobs/"+jobID, nil, "")
+	if err == nil {
+		res.Body.Close()
+	}
+	return err
+}
+
+func (c *Client) StartInteractive(ctx context.Context, key, command, sid, execID string) (*InteractiveSessionInfo, error) {
+	var out InteractiveSessionInfo
+	err := c.json(ctx, "POST", "/sessions/"+key+"/interactive", map[string]string{"command": command, "session_id": sid, "exec_id": execID}, &out)
+	return &out, err
+}
+
+func (c *Client) ListInteractive(ctx context.Context, key string) ([]InteractiveSessionInfo, error) {
+	var out []InteractiveSessionInfo
+	err := c.json(ctx, "GET", "/sessions/"+key+"/interactive", nil, &out)
+	return out, err
+}
+
+func (c *Client) WriteInteractive(ctx context.Context, key, sid, data, encoding string, autoNewline bool) (*InteractiveWriteResult, error) {
+	var out InteractiveWriteResult
+	err := c.json(ctx, "POST", "/sessions/"+key+"/interactive/"+sid+"/write", InteractiveWriteRequest{
+		Data:        data,
+		Encoding:    encoding,
+		AutoNewline: autoNewline,
+	}, &out)
+	return &out, err
+}
+
+func (c *Client) ReadInteractive(ctx context.Context, key, sid string, offset int64, waitMs int) (*InteractiveReadResult, error) {
+	var out InteractiveReadResult
+	path := fmt.Sprintf("/sessions/%s/interactive/%s/read?offset=%d&wait_ms=%d", key, sid, offset, waitMs)
+	err := c.json(ctx, "GET", path, nil, &out)
+	return &out, err
+}
+
+func (c *Client) CloseInteractive(ctx context.Context, key, sid string) error {
+	res, err := c.request(ctx, "DELETE", "/sessions/"+key+"/interactive/"+sid, nil, "")
+	if err == nil {
+		res.Body.Close()
+	}
+	return err
+}
