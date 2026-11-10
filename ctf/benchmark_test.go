@@ -200,3 +200,36 @@ func TestCTFBenchmarkSuite(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractWorkPrunesDeletedFiles(t *testing.T) {
+	dir := t.TempDir()
+	// Pre-populate stale file that was deleted inside container /work
+	stalePath := dir + "/stale.bin"
+	if err := os.WriteFile(stalePath, []byte("old-oversized-content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	content := []byte("print('fresh')\n")
+	if err := tw.WriteHeader(&tar.Header{Name: "solve.py", Typeflag: tar.TypeReg, Mode: 0600, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &Service{}
+	if err := svc.extractWork(&buf, dir); err != nil {
+		t.Fatalf("extractWork failed: %v", err)
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale.bin to be pruned, stat err=%v", err)
+	}
+	got, err := os.ReadFile(dir + "/solve.py")
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("expected solve.py content %q, got %q (%v)", string(content), string(got), err)
+	}
+}

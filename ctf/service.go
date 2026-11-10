@@ -399,7 +399,26 @@ func (s *Service) uploadInputs(ctx context.Context, key string, task int64, m ar
 		return nil
 	})
 }
+const (
+	defaultMaxWorkMB       = 512
+	maxWorkFiles           = 8192
+	maxSingleSyncFileBytes = 64 << 20
+)
+
+func maxWorkBytes() int64 {
+	if raw := strings.TrimSpace(os.Getenv("ARTEX_CTF_WORKDIR_MAX_MB")); raw != "" {
+		if mb, err := strconv.Atoi(raw); err == nil && mb >= 64 {
+			if mb > 2048 {
+				mb = 2048
+			}
+			return int64(mb) << 20
+		}
+	}
+	return defaultMaxWorkMB << 20
+}
+
 func (s *Service) uploadWork(ctx context.Context, key, dir string) error {
+	limit := maxWorkBytes()
 	return streamTar(ctx, func(r io.Reader) error { return s.Runner.Upload(ctx, key, false, r) }, func(tw *tar.Writer) error {
 		var total int64
 		count := 0
@@ -425,11 +444,15 @@ func (s *Service) uploadWork(ctx context.Context, key, dir string) error {
 			if !info.IsDir() && !info.Mode().IsRegular() {
 				return errors.New("工作目录不允许特殊文件")
 			}
+			// Skip oversized intermediate files on host cache rather than deadlocking container commands.
+			if !info.IsDir() && (info.Size() > maxSingleSyncFileBytes || total+info.Size() > limit || count+1 > maxWorkFiles) {
+				return nil
+			}
+			if info.IsDir() && count+1 > maxWorkFiles {
+				return nil
+			}
 			total += info.Size()
 			count++
-			if total > 128<<20 || count > 2048 {
-				return errors.New("工作目录超过 128 MiB / 2048 文件")
-			}
 			h, err := tar.FileInfoHeader(info, "")
 			if err != nil {
 				return err
@@ -471,24 +494,31 @@ func safeWorkPath(root, name string) (string, error) {
 	return p, nil
 }
 func (s *Service) extractWork(r io.Reader, dir string) error {
-	tr := tar.NewReader(io.LimitReader(r, 132<<20))
+	limit := maxWorkBytes()
+	stage := dir + ".sync-" + uuid.NewString()
+	if err := os.MkdirAll(stage, 0700); err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(stage) }()
+
+	tr := tar.NewReader(io.LimitReader(r, limit+(16<<20)))
 	var total int64
 	count := 0
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return syncStageToDir(stage, dir)
 		}
 		if err != nil {
 			return err
 		}
-		p, err := safeWorkPath(dir, h.Name)
+		p, err := safeWorkPath(stage, h.Name)
 		if err != nil {
 			return err
 		}
 		total += h.Size
 		count++
-		if h.Size < 0 || total > 128<<20 || count > 2048 {
+		if h.Size < 0 || total > limit || count > maxWorkFiles {
 			return errors.New("工作文件同步超过限制")
 		}
 		if h.Typeflag == tar.TypeDir {
@@ -520,6 +550,59 @@ func (s *Service) extractWork(r io.Reader, dir string) error {
 			return ce
 		}
 	}
+}
+
+func syncStageToDir(stage, dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	keep := map[string]bool{}
+	err := filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == stage {
+			return err
+		}
+		rel, e := filepath.Rel(stage, p)
+		if e != nil {
+			return e
+		}
+		keep[filepath.ToSlash(rel)] = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	var stale []string
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == dir {
+			return nil
+		}
+		rel, e := filepath.Rel(dir, p)
+		if e == nil && !keep[filepath.ToSlash(rel)] {
+			stale = append(stale, p)
+		}
+		return nil
+	})
+	for i := len(stale) - 1; i >= 0; i-- {
+		_ = os.RemoveAll(stale[i])
+	}
+	return filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == stage {
+			return err
+		}
+		rel, e := filepath.Rel(stage, p)
+		if e != nil {
+			return e
+		}
+		dst := filepath.Join(dir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0700)
+		}
+		if err = os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+			return err
+		}
+		_ = os.Remove(dst)
+		return os.Rename(p, dst)
+	})
 }
 
 type Script struct {

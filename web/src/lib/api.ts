@@ -255,7 +255,7 @@ export const api = {
   task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
   createTask: (input: {
     mode?: "pentest" | "ctf";
-    challengeType?: "auto" | "web" | "pwn" | "reverse";
+    challengeType?: "auto" | "web" | "pwn" | "reverse" | "crypto" | "misc";
     attachmentBatchId?: string;
     name?: string;
     categoryId?: number;

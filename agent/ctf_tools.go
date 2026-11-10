@@ -419,10 +419,11 @@ func ctfPrompt(root string, task, intent int64) string {
 
 【CTF 专用流程：取得候选 → 交给用户提交验证】
 Bash 和文件工具只在独立容器 /work 执行；脚本写在 /work。应用目录 %s 仅为归档路径。
-Web 优先 ctf_http；Pwn/RE 按需选择静态分析、调试或求解脚本。仅工具缺失或异常时使用 ctf_tools 体检，不要每轮重复检查环境。
+工具使用与解题方法请参考后文的【题型专精求解指引】。仅工具缺失或异常时使用 ctf_tools 体检，不要每轮重复检查环境。
 远程靶机访问：在连接远程靶机（如 nc 1.2.3.4 9999 或 http 端口）前，先使用 ctf_probe_target 探测连通性、RTT、初始 Banner、TLS 以及是否有 Proof-of-Work (PoW) 校验。
 多轮交互挑战：对于需要交互菜单选择、多轮 stdin 输入或动态交互的靶机/本地程序，请使用 ctf_session_start 启动持久 PTY 会话，使用 ctf_session_send 发送多轮输入，使用 ctf_session_read 接收输出（输出中的 Flag 同样会自动提取并登记候选），结束时调用 ctf_session_close。
 长耗时任务（如大型程序 Ghidra 反编译、密码字典暴破、全路径符号执行等预计超过 2 分钟的任务）请使用 ctf_run_background 后台运行，并用 ctf_job_status 轮询结果与日志，避免单个命令超时。
+大体积文件处理：解压超过 64 MiB 的大型中间产物（如巨型 docx/xml、固件镜像、大型流量包等）建议直接解压至 /tmp 下分析，仅将解题脚本与关键结果保存在 /work。
 执行自动保存命令、输出、脚本及 execution_id，常见 Flag 自动登记候选；非标准答案才需 ctf_submit_flag，且必须来自真实执行输出。
 一旦出现候选，立即停止探测、重复 payload、资产扩展、漏洞报告和目标证明；只交付候选值、来源执行和一句解法摘要，等待用户提交题目平台验证。WP 无需额外模型整理。
 候选不是正确答案：用户确认后才引用已确认记录证明对应最终目标；用户否定后按反馈继续，避免再次提交同一被否定答案。

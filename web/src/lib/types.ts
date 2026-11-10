@@ -6,7 +6,7 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
   mode?: "pentest" | "ctf";
-  challenge_type?: "auto" | "web" | "pwn" | "reverse";
+  challenge_type?: "auto" | "web" | "pwn" | "reverse" | "crypto" | "misc";
   inputs_blocked_reason?: string;
   execution_blocked_reason?: string;
   id: string;

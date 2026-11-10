@@ -23,7 +23,7 @@ func NormalizeTaskMode(mode, challenge string) (string, string, error) {
 			challenge = "auto"
 		}
 		switch challenge {
-		case "auto", "web", "pwn", "reverse":
+		case "auto", "web", "pwn", "reverse", "crypto", "misc":
 			return mode, challenge, nil
 		}
 	}

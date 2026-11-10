@@ -263,7 +263,7 @@ func (s *Server) putFiles(w http.ResponseWriter, r *http.Request, inputs bool) {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := validateUpload(pw, http.MaxBytesReader(w, r.Body, 400<<20), inputs)
+		err := validateUpload(pw, http.MaxBytesReader(w, r.Body, 1024<<20), inputs)
 		_ = pw.CloseWithError(err)
 		done <- err
 	}()
@@ -315,7 +315,7 @@ func validateUpload(w io.Writer, r io.Reader, inputs bool) error {
 		}
 		total += h.Size
 		count++
-		if h.Size < 0 || total > 256<<20 || count > 2048 {
+		if h.Size < 0 || total > 512<<20 || count > 8192 {
 			return errors.New("workspace upload limit exceeded")
 		}
 		executable := h.Mode&0111 != 0
@@ -364,11 +364,14 @@ func copyWorkspace(w io.Writer, r io.Reader) error {
 		if !safeRelative(name) || (h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir) {
 			continue
 		}
+		if h.Typeflag == tar.TypeReg && (h.Size < 0 || h.Size > 64<<20 || total+h.Size > 512<<20 || count+1 > 8192) {
+			continue
+		}
+		if h.Typeflag == tar.TypeDir && count+1 > 8192 {
+			continue
+		}
 		total += h.Size
 		count++
-		if total > 128<<20 || count > 2048 {
-			return errors.New("workspace output limit exceeded")
-		}
 		h.Name = name
 		h.Uid = 1000
 		h.Gid = 1000

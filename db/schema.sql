@@ -549,7 +549,9 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEF
 -- CTF task input metadata. Files and versioned manifests live under the task
 -- directory and are included by the existing cold archive file stage.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'pentest' CHECK (mode IN ('pentest','ctf'));
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS challenge_type TEXT NOT NULL DEFAULT '' CHECK (challenge_type IN ('','auto','web','pwn','reverse'));
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS challenge_type TEXT NOT NULL DEFAULT '' CHECK (challenge_type IN ('','auto','web','pwn','reverse','crypto','misc'));
+ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_challenge_type_check;
+ALTER TABLE tasks ADD CONSTRAINT tasks_challenge_type_check CHECK (challenge_type IN ('','auto','web','pwn','reverse','crypto','misc'));
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_batch_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_input_hash TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_attachment_batch ON tasks(attachment_batch_id) WHERE attachment_batch_id<>'';

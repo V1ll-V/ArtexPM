@@ -14,6 +14,7 @@ func TestTaskModeDefaultsAndValidation(t *testing.T) {
 	}{
 		{"", "", "pentest", "", true}, {"ctf", "", "ctf", "auto", true},
 		{"ctf", "pwn", "ctf", "pwn", true}, {"ctf", "reverse", "ctf", "reverse", true},
+		{"ctf", "crypto", "ctf", "crypto", true}, {"ctf", "misc", "ctf", "misc", true},
 		{"pentest", "pwn", "", "", false}, {"unknown", "", "", "", false}, {"ctf", "unknown", "", "", false},
 	} {
 		mode, challenge, err := NormalizeTaskMode(tc.mode, tc.challenge)
