@@ -216,6 +216,9 @@ func (d *DB) DecideCTFCandidate(ctx context.Context, taskID, id, expectedRevisio
 		if state == "accepted" {
 			payload, _ := json.Marshal(map[string]any{"summary": "人工确认本题候选答案：" + c.Value, "detail": notes, "subtype": "ctf_answer", "candidate_id": c.ID, "execution_id": c.ExecutionID, "input_hash": c.InputHash, "verification": "operator_confirmed"})
 			_, err = tx.ExecContext(ctx, `INSERT INTO exploration_nodes(exploration_id,kind,payload,state,origin) SELECT exploration_id,'fact',$2::jsonb,'confirmed','human' FROM tasks WHERE id=$1`, taskID, string(payload))
+			if err == nil {
+				_, _ = tx.ExecContext(ctx, `UPDATE exploration_nodes SET blocked_reason='' WHERE exploration_id=(SELECT exploration_id FROM tasks WHERE id=$1) AND kind='goal' AND state='open' AND blocked_reason='CTF 答案确认已撤销，请重新验证'`, taskID)
+			}
 		}
 		if state == "rejected" && c.State == "accepted" {
 			_, err = tx.ExecContext(ctx, `UPDATE exploration_nodes SET state='open',blocked_reason='CTF 答案确认已撤销，请重新验证' WHERE exploration_id=(SELECT exploration_id FROM tasks WHERE id=$1) AND kind='goal' AND state='met'`, taskID)

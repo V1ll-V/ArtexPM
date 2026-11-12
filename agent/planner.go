@@ -490,7 +490,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
 		renderPlannerTodos(opts.Todos.List())
 	if ctfMode {
-		input = "根据当前 CTF 状态推进最短解法：无候选且需要新方向时最多派一个意图；有候选立即等待用户；已确认时只使用已有证据证明对应目标。" + situational + renderPlannerTodos(opts.Todos.List())
+		input = "根据当前 CTF 状态推进最短解法：若有未确认的候选 Flag 则等待用户；若已有 Flag 已确认，用已有证据标记对应分目标达成（prove_goal）；若图中仍有未达成的 open 目标，必须立即规划新意图推进下一个未完成场景（当前若无 open/running 意图，本轮必须产出一个推进意图，不得停摆）；仅当全部目标达成或已有意图在跑时才不派发新意图。" + situational + renderPlannerTodos(opts.Todos.List())
 	}
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。

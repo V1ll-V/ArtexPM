@@ -81,7 +81,7 @@ func reopenRevokedCTFCompletionTx(ctx context.Context, tx *sql.Tx, taskID int64)
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE exploration_nodes SET state='open',blocked_reason='CTF 答案确认已撤销，请重新验证'
+	if _, err = tx.ExecContext(ctx, `UPDATE exploration_nodes SET state='open',blocked_reason=''
  WHERE exploration_id=(SELECT exploration_id FROM tasks WHERE id=$2) AND kind='goal' AND state='abandoned'
  AND id::text IN (SELECT value->>'id' FROM jsonb_array_elements($1::jsonb->'unfinished_goals'))`, payload, taskID); err != nil {
 		return err

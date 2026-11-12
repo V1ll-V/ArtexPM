@@ -180,17 +180,22 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 
 	// 1. Identify accepted or winning candidates
 	currentHash := Hash(m)
-	var confirmedCand *db.CTFCandidate
+	var acceptedCands []*db.CTFCandidate
 	var latestCand *db.CTFCandidate
 	for i := range candidates {
 		c := &candidates[i]
-		if c.State == "accepted" && c.InputHash == currentHash {
-			confirmedCand = c
-			break
+		if c.InputHash != currentHash {
+			continue
 		}
-		if c.State == "candidate" && c.InputHash == currentHash {
+		if c.State == "accepted" {
+			acceptedCands = append(acceptedCands, c)
+		} else if c.State == "candidate" && latestCand == nil {
 			latestCand = c
 		}
+	}
+	var confirmedCand *db.CTFCandidate
+	if len(acceptedCands) > 0 {
+		confirmedCand = acceptedCands[0]
 	}
 
 	winningExecID := ""
@@ -217,7 +222,9 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 
 	// Title and Summary Metadata
 	fmt.Fprintf(&b, "# 解题报告（Write-up）— %s\n\n", strings.ReplaceAll(name, "\n", " "))
-	if confirmedCand != nil {
+	if len(acceptedCands) > 1 {
+		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **多 Flag 解题成功已确认**：本题已累计确认 **%d 个有效 Flag**并在题目平台核验无误，以下为各场景解题步骤、PoC 与 Flag 汇总清单。\n\n", len(acceptedCands))
+	} else if confirmedCand != nil {
 		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **解题成功已确认**：当前输入的答案已由用户确认并在题目平台核验无误，以下为整理后的精炼复现步骤与完整求解源码。\n\n")
 	} else if latestCand != nil {
 		fmt.Fprintf(&b, "> [!NOTE]\n> **阶段报告（解题草稿）**：已捕获候选 Flag（`%s`），正等待在题目平台进行提交验证。\n\n", latestCand.Value)
@@ -228,7 +235,9 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 	b.WriteString("| 属性 | 内容 |\n| :--- | :--- |\n")
 	fmt.Fprintf(&b, "| **题目名称** | %s |\n", strings.ReplaceAll(name, "\n", " "))
 	fmt.Fprintf(&b, "| **赛题类别** | %s |\n", challengeLabel)
-	if confirmedCand != nil {
+	if len(acceptedCands) > 1 {
+		fmt.Fprintf(&b, "| **已确认 Flag** | 累计确认 **%d 个 Flag**（见下文汇总表） |\n", len(acceptedCands))
+	} else if confirmedCand != nil {
 		fmt.Fprintf(&b, "| **最终 Flag** | `%s` (平台验证确认) |\n", confirmedCand.Value)
 	} else if latestCand != nil {
 		fmt.Fprintf(&b, "| **当前候选** | `%s` (待确认) |\n", latestCand.Value)
@@ -349,7 +358,18 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 
 	// 0x04 Verification and Flag
 	b.WriteString("## 0x04 验证结果与 Flag\n\n")
-	if confirmedCand != nil {
+	if len(acceptedCands) > 1 {
+		fmt.Fprintf(&b, "本题为多场景 / 多 Flag 赛题，目前已在题目平台核验并确认 **%d 个有效 Flag**：\n\n", len(acceptedCands))
+		b.WriteString("| 序号 | 关联场景 / 验证备注 | 最终 Flag | 来源执行记录 |\n| :---: | :--- | :--- | :--- |\n")
+		for idx, ac := range acceptedCands {
+			note := ac.Notes
+			if note == "" {
+				note = fmt.Sprintf("Flag %d", idx+1)
+			}
+			fmt.Fprintf(&b, "| %d | %s | `%s` | `%s` |\n", idx+1, strings.ReplaceAll(note, "|", "-"), ac.Value, ac.ExecutionID)
+		}
+		b.WriteString("\n")
+	} else if confirmedCand != nil {
 		fmt.Fprintf(&b, "- **最终验证 Flag**：`%s`\n", confirmedCand.Value)
 		fmt.Fprintf(&b, "- **验证状态**：已由用户在题目平台提交并确认为正确答案（Accepted）\n")
 		if confirmedCand.Notes != "" {
@@ -446,6 +466,7 @@ func (s *Service) generateDeterministicOptimizedWP(
 	name, description, goal, challenge string,
 	manifest artifacts.Manifest,
 	executions []db.CTFExecution,
+	acceptedCands []*db.CTFCandidate,
 	confirmedCand *db.CTFCandidate,
 	latestCand *db.CTFCandidate,
 	winningExecID string,
@@ -462,7 +483,9 @@ func (s *Service) generateDeterministicOptimizedWP(
 	}
 
 	flagVal := "待验证"
-	if confirmedCand != nil {
+	if len(acceptedCands) > 1 {
+		flagVal = fmt.Sprintf("累计 %d 个已确认 Flag", len(acceptedCands))
+	} else if confirmedCand != nil {
 		flagVal = confirmedCand.Value
 	} else if latestCand != nil {
 		flagVal = latestCand.Value
@@ -474,7 +497,9 @@ func (s *Service) generateDeterministicOptimizedWP(
 	b.WriteString("| 赛题属性 | 说明 |\n| :--- | :--- |\n")
 	fmt.Fprintf(&b, "| **赛题名称** | %s |\n", strings.ReplaceAll(name, "\n", " "))
 	fmt.Fprintf(&b, "| **赛题类别** | %s |\n", challengeLabel)
-	if confirmedCand != nil {
+	if len(acceptedCands) > 1 {
+		fmt.Fprintf(&b, "| **已确认 Flag** | 累计确认 **%d 个有效 Flag**（见下文清单） |\n", len(acceptedCands))
+	} else if confirmedCand != nil {
 		fmt.Fprintf(&b, "| **最终 Flag** | `%s` (平台验证确认) |\n", confirmedCand.Value)
 	} else if latestCand != nil {
 		fmt.Fprintf(&b, "| **当前命中 Flag** | `%s` (待平台核验) |\n", latestCand.Value)
@@ -604,7 +629,18 @@ func (s *Service) generateDeterministicOptimizedWP(
 
 	// 0x04 Verification and Flag
 	b.WriteString("## 0x04 验证结果与最终 Flag\n\n")
-	if confirmedCand != nil {
+	if len(acceptedCands) > 1 {
+		fmt.Fprintf(&b, "本题已累计核验并确认 **%d 个有效 Flag**：\n\n", len(acceptedCands))
+		b.WriteString("| 序号 | 关联场景 / 验证备注 | 最终 Flag | 来源执行 ID |\n| :---: | :--- | :--- | :--- |\n")
+		for idx, ac := range acceptedCands {
+			note := ac.Notes
+			if note == "" {
+				note = fmt.Sprintf("Flag %d", idx+1)
+			}
+			fmt.Fprintf(&b, "| %d | %s | `%s` | `%s` |\n", idx+1, strings.ReplaceAll(note, "|", "-"), ac.Value, ac.ExecutionID)
+		}
+		b.WriteString("\n")
+	} else if confirmedCand != nil {
 		fmt.Fprintf(&b, "- **最终验证 Flag**：`%s`\n", confirmedCand.Value)
 		fmt.Fprintf(&b, "- **验证状态**：已由用户在题目平台提交并确认为正确答案（Accepted）\n")
 		if confirmedCand.Notes != "" {
@@ -628,6 +664,7 @@ func (s *Service) llmOptimizeWP(
 	name, description, goal, challenge string,
 	manifest artifacts.Manifest,
 	executions []db.CTFExecution,
+	acceptedCands []*db.CTFCandidate,
 	confirmedCand *db.CTFCandidate,
 	latestCand *db.CTFCandidate,
 	winningExecID string,
@@ -652,7 +689,9 @@ func (s *Service) llmOptimizeWP(
 5. 直接输出标准 GitHub 风格 Markdown 文本，不要带有最外层的包装标记。`
 
 	flagVal := "待验证"
-	if confirmedCand != nil {
+	if len(acceptedCands) > 1 {
+		flagVal = fmt.Sprintf("累计 %d 个已确认 Flag", len(acceptedCands))
+	} else if confirmedCand != nil {
 		flagVal = confirmedCand.Value
 	} else if latestCand != nil {
 		flagVal = latestCand.Value
@@ -683,19 +722,28 @@ func (s *Service) llmOptimizeWP(
 		usefulCmds = usefulCmds[len(usefulCmds)-10:]
 	}
 
+	multiFlagSection := ""
+	if len(acceptedCands) > 1 {
+		multiFlagSection = fmt.Sprintf("【已确认有效 Flag 清单（共 %d 个）】：\n", len(acceptedCands))
+		for i, ac := range acceptedCands {
+			multiFlagSection += fmt.Sprintf("- [%d] 场景/备注：%s | Flag：%s | 来源执行：%s\n", i+1, ac.Notes, ac.Value, ac.ExecutionID)
+		}
+		multiFlagSection += "\n请在 0x04 验证结果与最终 Flag 章节中以表格形式完整列出这全部已确认的 Flag 与场景备注。\n\n"
+	}
+
 	userContent := fmt.Sprintf(`【赛题名称】：%s
 【赛题类别】：%s
 【题目描述】：%s
 【交付目标】：%s
 【最终验证 Flag】：%s
-【关键成功命令】：
+%s【关键成功命令】：
 %s
 【关键回显输出】：
 %s
 【核心求解 PoC / Exploit 脚本】：
 %s
 【精选有效命令历史】：
-%s`, name, challenge, description, goal, flagVal, winningCmd, winningOutput, pocCode, strings.Join(usefulCmds, "\n"))
+%s`, name, challenge, description, goal, flagVal, multiFlagSection, winningCmd, winningOutput, pocCode, strings.Join(usefulCmds, "\n"))
 
 	llmCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -720,7 +768,7 @@ func (s *Service) llmOptimizeWP(
 	}
 	text = strings.TrimSpace(text)
 
-	if strings.Contains(text, "#") && strings.Contains(text, flagVal) && len(text) > 200 {
+	if strings.Contains(text, "#") && len(text) > 200 {
 		return text
 	}
 	return ""
@@ -753,17 +801,22 @@ func (s *Service) GenerateOptimizedWP(ctx context.Context, task int64, prov llm.
 	}
 
 	currentHash := Hash(m)
-	var confirmedCand *db.CTFCandidate
+	var acceptedCands []*db.CTFCandidate
 	var latestCand *db.CTFCandidate
 	for i := range candidates {
 		c := &candidates[i]
-		if c.State == "accepted" && c.InputHash == currentHash {
-			confirmedCand = c
-			break
+		if c.InputHash != currentHash {
+			continue
 		}
-		if c.State == "candidate" && c.InputHash == currentHash {
+		if c.State == "accepted" {
+			acceptedCands = append(acceptedCands, c)
+		} else if c.State == "candidate" && latestCand == nil {
 			latestCand = c
 		}
+	}
+	var confirmedCand *db.CTFCandidate
+	if len(acceptedCands) > 0 {
+		confirmedCand = acceptedCands[0]
 	}
 
 	winningExecID := ""
@@ -811,10 +864,10 @@ func (s *Service) GenerateOptimizedWP(ctx context.Context, task int64, prov llm.
 
 	optimizedMarkdown := ""
 	if prov != nil {
-		optimizedMarkdown = s.llmOptimizeWP(ctx, prov, name, description, goal, challenge, m, executions, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+		optimizedMarkdown = s.llmOptimizeWP(ctx, prov, name, description, goal, challenge, m, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
 	}
 	if strings.TrimSpace(optimizedMarkdown) == "" {
-		optimizedMarkdown = s.generateDeterministicOptimizedWP(name, description, goal, challenge, m, executions, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+		optimizedMarkdown = s.generateDeterministicOptimizedWP(name, description, goal, challenge, m, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
 	}
 
 	revision := "opt-" + SHA([]byte(optimizedMarkdown))[:16]

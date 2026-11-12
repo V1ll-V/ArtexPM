@@ -1720,6 +1720,9 @@ export interface CTFProgress {
   execution_count: number;
   pending_count: number;
   accepted_count: number;
+  goals_total?: number;
+  goals_met?: number;
+  goals_open?: number;
 }
 export interface CTFWriteup {
   revision: string;
