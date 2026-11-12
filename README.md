@@ -1,6 +1,6 @@
 <div align="center">
 
-# ARTEX PM v0.5 · ArtexPM
+# ARTEX PM v0.6 · ArtexPM
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 

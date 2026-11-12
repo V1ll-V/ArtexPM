@@ -124,14 +124,16 @@ func (s *Service) GenerateWP(ctx context.Context, task int64) (WP, error) {
 		return result, err
 	}
 
+	const wpGeneratorVersion = "v0.6.0"
 	source := struct {
+		GeneratorVersion                           string
 		Task                                       int64
 		Name, Description, Goal, Status, Challenge string
 		Manifest                                   artifacts.Manifest
 		Executions                                 []db.CTFExecution
 		Candidates                                 []db.CTFCandidate
 		Facts                                      []wpFact
-	}{task, name, description, goal, status, challenge, m, executions, candidates, facts}
+	}{wpGeneratorVersion, task, name, description, goal, status, challenge, m, executions, candidates, facts}
 	raw, _ := json.Marshal(source)
 	revision := SHA(raw)
 	dir := filepath.Join(s.Root, "tasks", fmt.Sprint(task), "deliverables", "wp")
