@@ -32,3 +32,16 @@ func TestWPNoiseFilterAndSummaries(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateOverviewText(t *testing.T) {
+	categories := []string{"pwn", "reverse", "crypto", "misc", "web", "other"}
+	for _, cat := range categories {
+		overview := generateOverviewText("Sample Challenge", cat, "flag{test_123}")
+		if !strings.Contains(overview, "Sample Challenge") {
+			t.Errorf("expected overview to mention challenge name for %s", cat)
+		}
+		if !strings.Contains(overview, "flag{test_123}") {
+			t.Errorf("expected overview to mention flag for %s", cat)
+		}
+	}
+}

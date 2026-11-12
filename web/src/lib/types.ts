@@ -1721,4 +1721,10 @@ export interface CTFProgress {
   pending_count: number;
   accepted_count: number;
 }
-export interface CTFWriteup { revision: string; markdown: string; sha256: string; generated_at: string }
+export interface CTFWriteup {
+  revision: string;
+  markdown: string;
+  sha256: string;
+  generated_at: string;
+  is_optimized?: boolean;
+}

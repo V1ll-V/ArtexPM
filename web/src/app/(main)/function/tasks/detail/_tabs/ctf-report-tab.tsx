@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { CheckIcon, CopyIcon, DownloadIcon, RefreshCwIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, DownloadIcon, RefreshCwIcon, RotateCcwIcon, SparklesIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Markdown } from "@/components/markdown";
@@ -88,6 +88,7 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
   const [candidates, setCandidates] = React.useState<CTFCandidate[]>([]);
   const [progress, setProgress] = React.useState<CTFProgress>();
   const [busy, setBusy] = React.useState(false);
+  const [optimizing, setOptimizing] = React.useState(false);
   const [error, setError] = React.useState("");
   const request = React.useRef<AbortController | null>(null);
   const mutating = React.useRef<string | null>(null);
@@ -159,6 +160,32 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
       toast.error(err instanceof Error ? err.message : "下载失败");
     }
   }
+
+  async function handleOptimizeWP() {
+    setOptimizing(true);
+    try {
+      const res = await api.optimizeCTFWP(taskId);
+      setWP(res);
+      toast.success("已完成 WP 提炼优化（去噪并生成整体思路概述）");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "优化 WP 失败");
+    } finally {
+      setOptimizing(false);
+    }
+  }
+
+  async function handleResetWP() {
+    setOptimizing(true);
+    try {
+      const res = await api.resetCTFWP(taskId);
+      setWP(res);
+      toast.success("已恢复原始完整过程 WP");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "恢复 WP 失败");
+    } finally {
+      setOptimizing(false);
+    }
+  }
   return (
     <div className="space-y-4">
       {progress && (
@@ -198,15 +225,36 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
       <Card>
         <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-sm">解题报告（WP）</CardTitle>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => void refresh()}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant={wp?.is_optimized ? "outline" : "default"}
+              className={wp?.is_optimized ? "border-amber-500/40 text-amber-600 dark:text-amber-400" : "bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white shadow-sm"}
+              disabled={busy || optimizing}
+              onClick={handleOptimizeWP}
+            >
+              <SparklesIcon className={`size-3.5 ${optimizing ? "animate-spin" : ""}`} />
+              {optimizing ? "正在提炼优化…" : "优化 WP"}
+            </Button>
+            {wp?.is_optimized && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy || optimizing}
+                onClick={handleResetWP}
+              >
+                <RotateCcwIcon className="size-3.5" />
+                恢复完整版
+              </Button>
+            )}
+            <Button size="sm" variant="outline" disabled={busy || optimizing} onClick={() => void refresh()}>
               <RefreshCwIcon className={busy ? "animate-spin" : ""} />
               刷新 WP
             </Button>
             <Button
               size="sm"
               variant="outline"
-              disabled={!wp}
+              disabled={!wp || optimizing}
               onClick={async () => {
                 if (wp && (await copyText(wp.markdown))) toast.success("已复制 WP");
               }}
@@ -216,7 +264,7 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
             </Button>
             <Button
               size="sm"
-              disabled={!wp}
+              disabled={!wp || optimizing}
               onClick={() =>
                 wp && download(new Blob([wp.markdown], { type: "text/markdown;charset=utf-8" }), `ctf-${taskId}-wp.md`)
               }
@@ -233,9 +281,21 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
             </p>
           )}
           {wp && (
-            <p className="font-mono text-xs text-muted-foreground">
-              版本 {wp.revision.slice(0, 12)} · {new Date(wp.generated_at).toLocaleString()}
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-mono text-xs text-muted-foreground">
+                版本 {wp.revision.slice(0, 12)} · {new Date(wp.generated_at).toLocaleString()}
+              </p>
+              {wp.is_optimized ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                  <SparklesIcon className="size-3" />
+                  已优化：核心思路精简版（已去噪，含整体解题思路概述）
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
+                  完整审计过程版
+                </span>
+              )}
+            </div>
           )}
           <div className="max-h-[70vh] overflow-auto rounded-md border bg-muted/20 p-4">
             {wp ? (

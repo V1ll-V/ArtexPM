@@ -313,6 +313,8 @@ export const api = {
   },
   ctfTools: () => get<CTFToolStatus>("/ctf/tools"),
   ctfWP: (id: string, signal?: AbortSignal) => http<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp`, { signal }),
+  optimizeCTFWP: (id: string) => post<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp/optimize`, {}),
+  resetCTFWP: (id: string) => post<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp/reset`, {}),
   ctfEvidence: (id: string, signal?: AbortSignal) => http<{ executions: CTFExecution[]; candidates: CTFCandidate[]; progress?: CTFProgress }>(`/tasks/${encodeURIComponent(id)}/ctf/evidence`, { signal }),
   decideCTFFlag: (task: string, candidate: CTFCandidate, state: "accepted" | "rejected", notes: string, completeTask = false) =>
     post<CTFCandidate>(`/tasks/${encodeURIComponent(task)}/ctf/candidates/${candidate.id}`, { state, notes, revision: candidate.revision, complete_task: completeTask }),

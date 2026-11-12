@@ -54,6 +54,37 @@ func (s *Server) ctfWP(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, wp)
 }
+
+func (s *Server) ctfOptimizeWP(w http.ResponseWriter, r *http.Request) {
+	t, done, ok := s.ctfTask(w, r)
+	if !ok {
+		return
+	}
+	defer done()
+	id, _ := strconv.ParseInt(t.ID, 10, 64)
+	prov := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "mainagent"}
+	wp, err := s.ctfService().GenerateOptimizedWP(r.Context(), id, prov)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, wp)
+}
+
+func (s *Server) ctfResetWP(w http.ResponseWriter, r *http.Request) {
+	t, done, ok := s.ctfTask(w, r)
+	if !ok {
+		return
+	}
+	defer done()
+	id, _ := strconv.ParseInt(t.ID, 10, 64)
+	wp, err := s.ctfService().ResetOptimizedWP(r.Context(), id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, wp)
+}
 func (s *Server) ctfEvidence(w http.ResponseWriter, r *http.Request) {
 	t, done, ok := s.ctfTask(w, r)
 	if !ok {
