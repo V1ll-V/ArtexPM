@@ -72,8 +72,8 @@ func summarizeCommand(cmd string) string {
 		return "隐写与元数据检测分析"
 	case strings.Contains(c, "file ") || strings.Contains(c, "xxd") || strings.Contains(c, "strings"):
 		return "文件格式与魔数/敏感字符串初步审查"
-	case strings.Contains(c, "tshark") || strings.Contains(c, "tcpdump"):
-		return "流量包数据流追踪与协议分析"
+	case strings.Contains(c, "pcap") || strings.Contains(c, "tshark") || strings.Contains(c, "tcpdump") || strings.Contains(c, "scapy"):
+		return "流量包结构化分析与传输对象/会话提取"
 	case strings.Contains(c, "python") || strings.Contains(c, "./") || strings.Contains(c, "gdb"):
 		return "运行核心解题与求解/利用脚本"
 	default:
@@ -124,7 +124,7 @@ func (s *Service) GenerateWP(ctx context.Context, task int64) (WP, error) {
 		return result, err
 	}
 
-	const wpGeneratorVersion = "v0.6.0"
+	const wpGeneratorVersion = "v0.7.0"
 	source := struct {
 		GeneratorVersion                           string
 		Task                                       int64

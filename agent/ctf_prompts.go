@@ -27,7 +27,13 @@ func ctfCategoryPrompt(challenge string, files []artifacts.Artifact) string {
    - 音频隐写：WAV/MP3 检查频域图（Spectrogram）、波形高低位或 MP3Stego。
    - Office 文档隐写（docx/xlsx/pptx）：本质为 zip 压缩包，解压后重点检索 word/document.xml、隐藏文字、白色文字、宏（vba）、rels 引用的外部资源。
 4. 流量分析与取证：
-   - PCAP/PCAPNG：使用 "tshark -r <file> -q -z conv,ip" 统计会话；导出 HTTP/FTP 传输对象；过滤追踪 TCP 流；提取 USB 键鼠数据包还原击键或光标轨迹。
+   - PCAP/PCAPNG 核心利器：优先使用专用工具 "ctf_pcap_analyze" 自动化提取（或在 Bash 中使用 "ctf-pcap"）：
+     * 结构初探（--mode=summary）：快速查看协议树、通信双方 IP、会话时长与数据量。
+     * Web 与传输文件（--mode=http / --mode=export）：审查请求 URI、状态码、认证凭据与 Cookie；一键将流量中传输的文件 dump 到工作区目录并提取哈希与 Flag。
+     * 隐蔽信道与外发（--mode=dns / --mode=icmp）：检测高熵长子域名（DNS Tunneling 外发）与 ICMP 数据区隐写。
+     * 会话全流跟踪（--mode=streams / --mode=stream）：定位关键 TCP 流并重组追踪双向明文交互。
+     * 快速全文检索（--mode=search --search="flag"）：全包搜索敏感字符串。
+   - 自定义脚本解析：可编写 Python 脚本调用 scapy（from scapy.all import *）或 pyshark 精细化重组私有协议段、USB 击键坐标还原等。
    - 内存镜像：使用 volatility 检测 profile、查看 pslist/cmdline、dump 关键进程或桌面截屏。
 5. 编码转换与条形码：
    - 常见编码组合：Base全家桶（Base64/32/58/85/91/92）、Hex、Unicode、JSFuck/Brainfuck、Morse 电码。

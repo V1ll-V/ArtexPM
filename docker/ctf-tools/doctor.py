@@ -20,12 +20,15 @@ for name, group, args in [
     ("seccomp-tools","pwn",["seccomp-tools","--version"]),
     ("exiftool","forensics",["exiftool","-ver"]),
     ("tshark","forensics",["tshark","-v"]),
+    ("tcpdump","forensics",["tcpdump","--version"]),
+    ("ctf-pcap","forensics",["python3","/opt/ctf/scripts/pcap_analyze.py","--help"]),
     ("Ghidra / Java","reverse",["bash","-c","test -f /opt/ctf/ghidra_12.1.4_PUBLIC/Ghidra/application.properties && grep application.version /opt/ctf/ghidra_12.1.4_PUBLIC/Ghidra/application.properties && java -version"]),
 ]: items.append(probe(name,group,args))
-distributions=dict(pwnlib="pwntools",keystone="keystone-engine",z3="z3-solver",claripy="angr",Crypto="pycryptodome",PIL="pillow")
+distributions=dict(pwnlib="pwntools",keystone="keystone-engine",z3="z3-solver",claripy="angr",Crypto="pycryptodome",PIL="pillow",scapy="scapy",pyshark="pyshark")
 for group, modules, python in [
     ("pwn",["pwnlib","capstone","unicorn","keystone","r2pipe","z3"],"/opt/ctf/pwn/bin/python"),
     ("crypto",["Crypto","gmpy2","sympy","numpy","PIL"],"/opt/ctf/pwn/bin/python"),
+    ("forensics",["scapy","pyshark"],"/opt/ctf/pwn/bin/python"),
     ("reverse",["angr","claripy","capstone","unicorn","keystone","z3"],"/opt/ctf/re/bin/python")
 ]:
     for module in modules:

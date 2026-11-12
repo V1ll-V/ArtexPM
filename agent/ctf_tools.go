@@ -42,7 +42,7 @@ func ctfBase(ctx context.Context, root string, ts *db.ExplorationStore, task, in
 	return context.WithValue(ctx, ctfRunKey{}, true), out
 }
 
-var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binary_info", "ctf_gdb", "ctf_python", "ctf_decompile", "ctf_radare2", "Read", "LS", "ctf_tools", "ctf_run_background", "ctf_job_status", "ctf_job_stop", "ctf_probe_target", "ctf_session_start", "ctf_session_send", "ctf_session_read", "ctf_session_close"}
+var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binary_info", "ctf_gdb", "ctf_python", "ctf_decompile", "ctf_radare2", "Read", "LS", "ctf_tools", "ctf_run_background", "ctf_job_status", "ctf_job_stop", "ctf_probe_target", "ctf_session_start", "ctf_session_send", "ctf_session_read", "ctf_session_close", "ctf_pcap_analyze"}
 
 func ctfCatalogTools() []actool.CoreTool {
 	out := []actool.CoreTool{}
@@ -278,6 +278,52 @@ func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
 			}
 			return actool.Text(e.StdoutExcerpt), nil
 		}),
+		readTool("ctf_pcap_analyze", "对 PCAP / PCAPNG 流量包进行结构化深度分析与证据提取。支持 mode：'summary'（协议分布与 IP 对话摘要）、'http'（提取 HTTP 请求/响应/凭据）、'dns'（DNS 解析与隧道外发分析）、'streams'（TCP 会话列表）、'stream'（跟进指定 stream_id 的双向会话全文）、'export'（一键导出 HTTP 传输文件到 export_dir）、'search'（搜索关键内容或 Flag）、'icmp'（提取 ICMP 数据段隐写）。返回内容中检测到的 Flag 自动登记为候选。", obj(map[string]any{
+			"file_path":  str("流量包路径，如 /work/.inputs/.../traffic.pcap"),
+			"mode":       str("分析模式：summary / http / dns / streams / stream / export / search / icmp，默认 summary"),
+			"stream_id":  intp("当 mode 为 stream 时指定的 TCP stream 编号，默认 0"),
+			"filter":     str("可选的 Wireshark 显示过滤表达式，如 'http.request' 或 'tcp.port == 80'"),
+			"search":     str("当 mode 为 search 时的搜索关键字或正则，默认 'flag'"),
+			"export_dir": str("当 mode 为 export 时的文件导出目标目录，默认 '/work/exported_pcap'"),
+		}, "file_path"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			p, err := file(a)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			mode := text(a, "mode")
+			if mode == "" {
+				mode = "summary"
+			}
+			streamID := num(a, "stream_id", 0)
+			filt := text(a, "filter")
+			searchKw := text(a, "search")
+			exportDir := text(a, "export_dir")
+			if exportDir == "" {
+				exportDir = "/work/exported_pcap"
+			}
+			args := fmt.Sprintf("%s --mode=%s --stream-id=%d --export-dir=%s", quote(p), quote(mode), streamID, quote(exportDir))
+			if filt != "" {
+				args += " --filter=" + quote(filt)
+			}
+			if searchKw != "" {
+				args += " --search=" + quote(searchKw)
+			}
+			cmd := fmt.Sprintf("if [ -f /opt/ctf/scripts/pcap_analyze.py ]; then python3 /opt/ctf/scripts/pcap_analyze.py %s; else python3 -c %s %s; fi",
+				args, quote(ctf.PcapAnalyzeScript), args)
+			e, err := s.Execute(ctx, task, intent, cmd, 120)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if e.ExitCode != 0 && e.Error != "" {
+				return actool.Errorf(fmt.Sprintf("%s: %s", e.Error, e.StderrExcerpt)), nil
+			}
+			return actool.Text(e.StdoutExcerpt), nil
+		}),
 		writeTool("ctf_session_start", "启动持久交互终端会话（PTY 伪终端模式），适用于需要多轮交互的 CTF 题目（如 nc 远程靶机、带菜单的本地 Pwn 程序、gdb 交互等）。启动后使用 ctf_session_send 发送输入，使用 ctf_session_read 接收输出。", obj(map[string]any{
 			"command":    str("启动命令，如 'nc 10.10.10.1 9999' 或 './vuln'"),
 			"session_id": str("会话标识（可选，如 pty1、remote_nc）"),
@@ -421,6 +467,7 @@ func ctfPrompt(root string, task, intent int64) string {
 Bash 和文件工具只在独立容器 /work 执行；脚本写在 /work。应用目录 %s 仅为归档路径。
 工具使用与解题方法请参考后文的【题型专精求解指引】。仅工具缺失或异常时使用 ctf_tools 体检，不要每轮重复检查环境。
 远程靶机访问：在连接远程靶机（如 nc 1.2.3.4 9999 或 http 端口）前，先使用 ctf_probe_target 探测连通性、RTT、初始 Banner、TLS 以及是否有 Proof-of-Work (PoW) 校验。
+流量包分析：遇到 .pcap / .pcapng 题目时，优先使用 ctf_pcap_analyze 进行多模式结构化提取（summary 把握全貌、http/dns 审计协议与外发、export 一键导出传输文件、stream 跟踪 TCP 对话、search 快速检索 Flag、icmp 提取隐写载荷）。
 多轮交互挑战：对于需要交互菜单选择、多轮 stdin 输入或动态交互的靶机/本地程序，请使用 ctf_session_start 启动持久 PTY 会话，使用 ctf_session_send 发送多轮输入，使用 ctf_session_read 接收输出（输出中的 Flag 同样会自动提取并登记候选），结束时调用 ctf_session_close。
 长耗时任务（如大型程序 Ghidra 反编译、密码字典暴破、全路径符号执行等预计超过 2 分钟的任务）请使用 ctf_run_background 后台运行，并用 ctf_job_status 轮询结果与日志，避免单个命令超时。
 大体积文件处理：解压超过 64 MiB 的大型中间产物（如巨型 docx/xml、固件镜像、大型流量包等）建议直接解压至 /tmp 下分析，仅将解题脚本与关键结果保存在 /work。

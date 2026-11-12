@@ -3,3 +3,5 @@ gmpy2>=2.1.5
 sympy>=1.12
 numpy>=1.26
 pillow>=10.0
+scapy>=2.5.0
+pyshark>=0.6

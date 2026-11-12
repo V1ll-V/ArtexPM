@@ -1,6 +1,6 @@
 <div align="center">
 
-# ARTEX PM v0.6 · ArtexPM
+# ARTEX PM v0.7 · ArtexPM
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
@@ -59,7 +59,7 @@ WP 页面在可见时每 5 秒自动更新，切换到后台后暂停刷新。�
 
 上传草稿由服务端生成批次 ID；`POST /api/gc?ttl=86400` 可清理超过一天的未绑定草稿，数据库引用的待绑定批次受到保护。文件与版本清单位于任务目录，数据库保存任务模式、题型和绑定批次，便于沿用已有归档文件事务。
 
-CTF 预览使用应用镜像 `autumn27/artex:v0.6.0`、执行器镜像 `autumn27/artex-ctf-runner:20261109` 和工具镜像 `autumn27/artex-ctf-tools:20261109`。`docker-compose.ctf-preview.yml` 使用项目名 `artex-ctf-preview`，访问 `http://localhost:8789`；它有独立数据库、数据卷、技能卷和执行器状态卷，首次进入需设置密码及模型。当前机器的预览配置保存在不纳入 Git 的 `data/ctf-preview.env`，包含数据库密码和至少 24 字符的随机 `ARTEX_CTF_RUNNER_TOKEN`。应用通过 `ARTEX_CTF_RUNNER_URL` 和相同令牌连接内部执行器；执行器不对宿主机发布端口。可用下列命令管理：
+CTF 预览使用应用镜像 `autumn27/artex:v0.7.0`、执行器镜像 `autumn27/artex-ctf-runner:20261109` 和工具镜像 `autumn27/artex-ctf-tools:20261109`。`docker-compose.ctf-preview.yml` 使用项目名 `artex-ctf-preview`，访问 `http://localhost:8789`；它有独立数据库、数据卷、技能卷和执行器状态卷，首次进入需设置密码及模型。当前机器的预览配置保存在不纳入 Git 的 `data/ctf-preview.env`，包含数据库密码和至少 24 字符的随机 `ARTEX_CTF_RUNNER_TOKEN`。应用通过 `ARTEX_CTF_RUNNER_URL` 和相同令牌连接内部执行器；执行器不对宿主机发布端口。可用下列命令管理：
 
 ```powershell
 docker compose --env-file data/ctf-preview.env -p artex-ctf-preview -f docker-compose.ctf-preview.yml up -d --pull never
@@ -72,7 +72,7 @@ docker compose --env-file data/ctf-preview.env -p artex-ctf-preview -f docker-co
 docker build -f Dockerfile.ctf-tools -t autumn27/artex-ctf-tools:20261109 .
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/amd64/ctf-runner ./cmd/ctf-runner
 docker build -f Dockerfile.ctf-runner -t autumn27/artex-ctf-runner:20261109 .
-docker build -t autumn27/artex:v0.6.0 .
+docker build -t autumn27/artex:v0.7.0 .
 ```
 
 Windows 下可在 `web` 中使用 `$env:NEXT_EXPORT='1'; npm run build -- --webpack` 完成静态构建。`ctf_decompile` 按二进制 SHA-256 在容器 `/tmp/ghidra_<hash>` 建立持久工程，二次反编译自动启用 `-noanalysis` 跳过重复导入与全量分析。真实样例集成测试为 `ctf/TestPwnREExecutionEvidenceWPAndArchive` 与跨领域基准套件 `ctf/TestCTFBenchmarkSuite`（及 12 题端到端基准脚本 `benchmarks/run_benchmark.py`，覆盖 Crypto / Reverse / Pwn / Forensics / Web），需设置测试专用的 `ARTEX_PG_DSN` 和 `ARTEX_CTF_DOCKER_TEST=1`。推荐通过 `ARTEX_CTF_TEST_RUNNER_URL` / `ARTEX_CTF_TEST_RUNNER_TOKEN` 连接单独执行器，使测试进程无需 Docker socket。测试会编译本地合成题目，覆盖 GDB 断点、Ghidra 反编译、pwntools 求解、angr/Claripy、候选确认、WP 缓存、归档恢复和超时续跑。

@@ -2,6 +2,36 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.7.0] - 2026-11-12
+
+### 新增与优化
+
+- **CTF 专精流量分析工具体系（`ctf_pcap_analyze` / `ctf-pcap`）**：
+  - **多模式结构化 PCAP 抓包分析引擎**：
+    - `summary`：基于 capinfos 与 tshark 提取捕获元数据、协议树（Protocol Hierarchy）及通信双方 IP 会话流。
+    - `http`：深度审计 HTTP 请求与响应流，自动提取请求方法、URI、状态码、Content-Type 及 Authorization 凭据与 Cookie。
+    - `dns`：提取 DNS 解析记录并自动嗅探异常超长子域名（识别 DNS Tunneling 隐蔽隧道与数据外发）。
+    - `streams` / `stream`：支持全量 TCP 会话流统计以及按 stream_id 完整重组追踪双向会话对话（follow stream）。
+    - `export`：全自动导出流量包内传输的 Web/HTTP 对象文件到工作区，计算哈希并扫描 Flag。
+    - `search`：全包跨帧搜索关键词或正则（自动关联帧号、协议与上下文）。
+    - `icmp`：自动提取 ICMP 数据段有效载荷文本，识别隐写通道。
+  - **环境依赖补充**：
+    - 工具镜像补充预装 `scapy` 与 `pyshark` Python 依赖。
+    - 工具箱新增预装 `tcpdump`。
+    - 专用工具 `ctf_pcap_analyze` 接入 Agent 决策流，输出中的 Flag 自动识别捕获并登记为候选。
+- **WP 报告引擎扩展**：
+  - 自动归类识别 PCAP、tshark、scapy、tcpdump 操作为“流量包结构化分析与传输对象/会话提取”关键步骤。
+
+## [0.6.0] - 2026-11-12
+
+### 新增与优化
+
+- **规范化比赛级 CTF Write-up（WP）自动整理与因果剪枝**：
+  - 自动识别并过滤无直接因果关系的探索性命令（如 `ls`、`pwd` 等）与报错重试指令，仅保留核心有效解题路径。
+  - 规范化结构输出：包含赛题元数据、解题核心思路概要、关键有效操作步骤、核心 PoC/利用脚本提炼以及已确认 Flag 展示。
+  - 审计流折叠保留：在 Markdown `<details>` 中折叠保存所有原始命令执行 ID、SHA-256 与日志流水，满足复核与安全审计需求。
+  - Flag 确认自动触发后台异步刷新与重新排版 WP。
+
 ## [0.5.1] - 2026-11-09
 
 ### 新增与优化
