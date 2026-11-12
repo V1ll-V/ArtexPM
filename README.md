@@ -21,7 +21,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
   3. README 按本分支的构建/升级方式调整；人工复核说明见下文。
   4. `install.sh` / `update.sh` 的 Docker 模式改为**本地构建镜像**；只有显式把 tag 改成非 `local` 时才会拉取上游镜像（且会二次确认）。
   5. 新增完整的**候选验收与可靠报告流程**，配套有界任务收尾、人工决定保护和统一启用检查，详见下方更新说明。
-  6. **v0.5.0** 新增独立的 CTF 解题、附件与执行证据、WP、Flag 提交交接和人工确认完成流程；通用任务执行与可选验收开关解耦。
+  6. **v0.6.0** 新增规范结构化 CTF WP 解题报告智能生成体系（去除调试噪音、提取有效操作步骤、核心求解脚本与 Flag 确认结果，并保留底层安全审计证据链）；扩充全套 Misc / Crypto 赛题支持与专精求解提示词。
 - **不要使用上游的「页面一键更新 / 预编译 Releases / `docker compose pull`」**：它们会拉取上游官方二进制，覆盖本分支的改动。本分支请用下方「快速开始（本分支）」的本地构建流程。
 - 开源协议仍为 **AGPL-3.0**；二次开发、分发与网络提供服务时需遵守原协议。
 
@@ -59,7 +59,7 @@ WP 页面在可见时每 5 秒自动更新，切换到后台后暂停刷新。�
 
 上传草稿由服务端生成批次 ID；`POST /api/gc?ttl=86400` 可清理超过一天的未绑定草稿，数据库引用的待绑定批次受到保护。文件与版本清单位于任务目录，数据库保存任务模式、题型和绑定批次，便于沿用已有归档文件事务。
 
-CTF 预览使用应用镜像 `autumn27/artex:v0.5.0`、执行器镜像 `autumn27/artex-ctf-runner:20261109` 和工具镜像 `autumn27/artex-ctf-tools:20261109`。`docker-compose.ctf-preview.yml` 使用项目名 `artex-ctf-preview`，访问 `http://localhost:8789`；它有独立数据库、数据卷、技能卷和执行器状态卷，首次进入需设置密码及模型。当前机器的预览配置保存在不纳入 Git 的 `data/ctf-preview.env`，包含数据库密码和至少 24 字符的随机 `ARTEX_CTF_RUNNER_TOKEN`。应用通过 `ARTEX_CTF_RUNNER_URL` 和相同令牌连接内部执行器；执行器不对宿主机发布端口。可用下列命令管理：
+CTF 预览使用应用镜像 `autumn27/artex:v0.6.0`、执行器镜像 `autumn27/artex-ctf-runner:20261109` 和工具镜像 `autumn27/artex-ctf-tools:20261109`。`docker-compose.ctf-preview.yml` 使用项目名 `artex-ctf-preview`，访问 `http://localhost:8789`；它有独立数据库、数据卷、技能卷和执行器状态卷，首次进入需设置密码及模型。当前机器的预览配置保存在不纳入 Git 的 `data/ctf-preview.env`，包含数据库密码和至少 24 字符的随机 `ARTEX_CTF_RUNNER_TOKEN`。应用通过 `ARTEX_CTF_RUNNER_URL` 和相同令牌连接内部执行器；执行器不对宿主机发布端口。可用下列命令管理：
 
 ```powershell
 docker compose --env-file data/ctf-preview.env -p artex-ctf-preview -f docker-compose.ctf-preview.yml up -d --pull never
@@ -72,7 +72,7 @@ docker compose --env-file data/ctf-preview.env -p artex-ctf-preview -f docker-co
 docker build -f Dockerfile.ctf-tools -t autumn27/artex-ctf-tools:20261109 .
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/amd64/ctf-runner ./cmd/ctf-runner
 docker build -f Dockerfile.ctf-runner -t autumn27/artex-ctf-runner:20261109 .
-docker build -t autumn27/artex:v0.5.0 .
+docker build -t autumn27/artex:v0.6.0 .
 ```
 
 Windows 下可在 `web` 中使用 `$env:NEXT_EXPORT='1'; npm run build -- --webpack` 完成静态构建。`ctf_decompile` 按二进制 SHA-256 在容器 `/tmp/ghidra_<hash>` 建立持久工程，二次反编译自动启用 `-noanalysis` 跳过重复导入与全量分析。真实样例集成测试为 `ctf/TestPwnREExecutionEvidenceWPAndArchive` 与跨领域基准套件 `ctf/TestCTFBenchmarkSuite`（及 12 题端到端基准脚本 `benchmarks/run_benchmark.py`，覆盖 Crypto / Reverse / Pwn / Forensics / Web），需设置测试专用的 `ARTEX_PG_DSN` 和 `ARTEX_CTF_DOCKER_TEST=1`。推荐通过 `ARTEX_CTF_TEST_RUNNER_URL` / `ARTEX_CTF_TEST_RUNNER_TOKEN` 连接单独执行器，使测试进程无需 Docker socket。测试会编译本地合成题目，覆盖 GDB 断点、Ghidra 反编译、pwntools 求解、angr/Claripy、候选确认、WP 缓存、归档恢复和超时续跑。
@@ -220,11 +220,11 @@ docker compose up -d
 - `docker build` 需要能访问 Debian / NodeSource / Playwright 的下载源。网络受限时，可以给构建传代理：
   `docker build --build-arg HTTP_PROXY=http://host.docker.internal:7890 --build-arg HTTPS_PROXY=http://host.docker.internal:7890 -t autumn27/artex:local .`
 
-### 将 v0.5 替换到已有 Docker 业务环境
+### 将 v0.6 替换到已有 Docker 业务环境
 
 升级使用原来的 Compose 项目、`.env`、`pgdata` 卷以及 `./data`、`./skills`。**不要删除数据库卷，也不要使用 `docker compose down -v`。** 更改项目名称或另开目录会连到另一套数据。
 
-1. 先按上面的步骤构建最新前端与内嵌二进制，编译时加 `-ldflags '-X main.version=v0.5.0'`，然后构建 `autumn27/artex:v0.5.0`。本地 tag 不表示已发布 Docker Hub 镜像，勿执行 `pull`。
+1. 先按上面的步骤构建最新前端与内嵌二进制，编译时加 `-ldflags '-X main.version=v0.6.0'`，然后构建 `autumn27/artex:v0.6.0`。本地 tag 不表示已发布 Docker Hub 镜像，勿执行 `pull`。
 2. 确认没有任务正在执行后，停止应用、备份数据库、数据目录和 `.env`，保留旧镜像。以下为本项目的 PowerShell 示例，其他安装需把项目名改为自己原来的名称：
 
 ```powershell
@@ -242,14 +242,14 @@ Copy-Item -LiteralPath ./skills -Destination "$backupDir/skills" -Recurse
 docker cp artex_last_version-main-artex-1:/app/jwt.key "$backupDir/jwt.key"
 ```
 
-3. 将原 `.env` 中的 `ARTEX_TAG` 改为 `v0.5.0`，其他密码和模型配置保持原值。只重建应用：
+3. 将原 `.env` 中的 `ARTEX_TAG` 改为 `v0.6.0`，其他密码和模型配置保持原值。只重建应用：
 
 ```powershell
 docker compose -p artex_last_version-main up -d --no-deps --pull never artex
 Invoke-RestMethod http://localhost:8787/api/health
 ```
 
-4. 打开 [控制台](http://localhost:8787)，应看到 **ARTEX PM v0.5**。使用原密码登录，检查原任务和发现。配置可用模型后即可执行任务；自动漏洞验收与报告可在“系统 → 候选验收”按需启用。重建容器可能需要重新登录，用户名仍为 `ARTEX`。
+4. 打开 [控制台](http://localhost:8787)，应看到 **ARTEX PM v0.6**。使用原密码登录，检查原任务和发现。配置可用模型后即可执行任务；自动漏洞验收与报告可在“系统 → 候选验收”按需启用。重建容器可能需要重新登录，用户名仍为 `ARTEX`。
 
 备份含密码、签名密钥及业务证据，请保存在仓库之外。升级后的数据库不能保证兼容旧程序，**回退需同时恢复升级前的数据库与 `data` 快照，并恢复旧 `.env`、旧镜像；仅切换镜像不算完整回退**。先停应用，在独立库验证恢复备份后再切回，保留当前数据另作快照。
 
@@ -259,7 +259,7 @@ Invoke-RestMethod http://localhost:8787/api/health
 
 ```powershell
 docker tag autumn27/artex:local autumn27/artex:pre-v040
-docker build -f Dockerfile.incremental --build-arg ARTEX_BASE_IMAGE=autumn27/artex:pre-v040 -t autumn27/artex:v0.5.0 .
+docker build -f Dockerfile.incremental --build-arg ARTEX_BASE_IMAGE=autumn27/artex:pre-v040 -t autumn27/artex:v0.6.0 .
 ```
 
 必须先完成前端导出和 Linux `embedui` 二进制编译。该方式不更新旧镜像的系统依赖，完整环境更新仍使用主 `Dockerfile`。增量镜像仅供本地使用；上传源码到 Git 不会把镜像上传到镜像仓库。

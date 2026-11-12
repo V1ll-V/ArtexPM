@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
 
   artex:
-    image: autumn27/artex:v0.5.0
+    image: autumn27/artex:v0.6.0
     depends_on:
       postgres:
         condition: service_healthy

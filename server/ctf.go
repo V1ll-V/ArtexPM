@@ -107,6 +107,11 @@ func (s *Server) decideCTFFlag(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, err.Error())
 		return
 	}
+	if in.State == "accepted" {
+		go func() {
+			_, _ = svc.GenerateWP(context.Background(), task)
+		}()
+	}
 	if t.lifecycleSnapshot().Status == "done" {
 		s.engine.cancelExec(t.ID, agent.AbortGoalMet)
 	} else if t.lifecycleSnapshot().Paused {

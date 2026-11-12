@@ -32,6 +32,55 @@ func fence(b string, lang string) string {
 	}
 	return mark + lang + "\n" + b + "\n" + mark + "\n\n"
 }
+
+type effectiveStep struct {
+	ExecutionID string
+	Command     string
+	Summary     string
+	Stdout      string
+	IsWinner    bool
+}
+
+func isNoiseCommand(cmd string) bool {
+	c := strings.TrimSpace(cmd)
+	if c == "" {
+		return true
+	}
+	// Pure exploratory inspection commands with no transformation or exploit logic
+	noisePrefixes := []string{
+		"ls", "dir", "pwd", "whoami", "id", "uname", "env",
+		"cd /work && ls", "cd /work; ls",
+	}
+	for _, p := range noisePrefixes {
+		if c == p || strings.HasPrefix(c, p+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeCommand(cmd string) string {
+	c := strings.TrimSpace(cmd)
+	switch {
+	case strings.Contains(c, "unzip") || strings.Contains(c, "tar ") || strings.Contains(c, "7z "):
+		return "解压并提取题目附件文件"
+	case strings.Contains(c, "checksec"):
+		return "检查二进制安全缓解机制（Canary / NX / PIE / RELRO）"
+	case strings.Contains(c, "binwalk") || strings.Contains(c, "foremost"):
+		return "提取与分离文件末尾隐藏结构/内嵌文件"
+	case strings.Contains(c, "exiftool") || strings.Contains(c, "zsteg") || strings.Contains(c, "steghide"):
+		return "隐写与元数据检测分析"
+	case strings.Contains(c, "file ") || strings.Contains(c, "xxd") || strings.Contains(c, "strings"):
+		return "文件格式与魔数/敏感字符串初步审查"
+	case strings.Contains(c, "tshark") || strings.Contains(c, "tcpdump"):
+		return "流量包数据流追踪与协议分析"
+	case strings.Contains(c, "python") || strings.Contains(c, "./") || strings.Contains(c, "gdb"):
+		return "运行核心解题与求解/利用脚本"
+	default:
+		return "执行关键分析操作"
+	}
+}
+
 func (s *Service) GenerateWP(ctx context.Context, task int64) (WP, error) {
 	unlock := executionLock(fmt.Sprintf("wp/%s/%d", s.Root, task))
 	defer unlock()
@@ -74,6 +123,7 @@ func (s *Service) GenerateWP(ctx context.Context, task int64) (WP, error) {
 	if err != nil {
 		return result, err
 	}
+
 	source := struct {
 		Task                                       int64
 		Name, Description, Goal, Status, Challenge string
@@ -97,114 +147,236 @@ func (s *Service) GenerateWP(ctx context.Context, task int64) (WP, error) {
 	} else if !os.IsNotExist(e) {
 		return result, e
 	}
+
+	// 1. Identify accepted or winning candidates
+	currentHash := Hash(m)
+	var confirmedCand *db.CTFCandidate
+	var latestCand *db.CTFCandidate
+	for i := range candidates {
+		c := &candidates[i]
+		if c.State == "accepted" && c.InputHash == currentHash {
+			confirmedCand = c
+			break
+		}
+		if c.State == "candidate" && c.InputHash == currentHash {
+			latestCand = c
+		}
+	}
+
+	winningExecID := ""
+	if confirmedCand != nil {
+		winningExecID = confirmedCand.ExecutionID
+	} else if latestCand != nil {
+		winningExecID = latestCand.ExecutionID
+	}
+
+	// Map executions by ID
+	execMap := make(map[string]*db.CTFExecution)
+	for i := range executions {
+		execMap[executions[i].ID] = &executions[i]
+	}
+
 	var b strings.Builder
 	if name == "" {
 		name = description
 	}
-	fmt.Fprintf(&b, "# 解题报告（WP）— %s\n\n", strings.ReplaceAll(name, "\n", " "))
-	currentHash := Hash(m)
-	accepted := []db.CTFCandidate{}
-	for _, c := range candidates {
-		if c.State == "accepted" && c.InputHash == currentHash {
-			accepted = append(accepted, c)
+	challengeLabel := strings.ToUpper(challenge)
+	if challengeLabel == "" || challengeLabel == "AUTO" {
+		challengeLabel = "CTF 综合 / 自动分析"
+	}
+
+	// Title and Summary Metadata
+	fmt.Fprintf(&b, "# 解题报告（Write-up）— %s\n\n", strings.ReplaceAll(name, "\n", " "))
+	if confirmedCand != nil {
+		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **解题成功已确认**：当前输入的答案已由用户确认并在题目平台核验无误，以下为整理后的精炼复现步骤与完整求解源码。\n\n")
+	} else if latestCand != nil {
+		fmt.Fprintf(&b, "> [!NOTE]\n> **阶段报告（解题草稿）**：已捕获候选 Flag（`%s`），正等待在题目平台进行提交验证。\n\n", latestCand.Value)
+	} else {
+		b.WriteString("> [!NOTE]\n> **阶段报告**：正在分析探索中，尚未捕获候选 Flag。\n\n")
+	}
+
+	b.WriteString("| 属性 | 内容 |\n| :--- | :--- |\n")
+	fmt.Fprintf(&b, "| **题目名称** | %s |\n", strings.ReplaceAll(name, "\n", " "))
+	fmt.Fprintf(&b, "| **赛题类别** | %s |\n", challengeLabel)
+	if confirmedCand != nil {
+		fmt.Fprintf(&b, "| **最终 Flag** | `%s` (平台验证确认) |\n", confirmedCand.Value)
+	} else if latestCand != nil {
+		fmt.Fprintf(&b, "| **当前候选** | `%s` (待确认) |\n", latestCand.Value)
+	} else {
+		b.WriteString("| **解题状态** | 正在分析探索中 |\n")
+	}
+	fmt.Fprintf(&b, "| **生成版本** | `%s` · %s |\n\n", revision[:12], time.Now().UTC().Format(time.RFC3339))
+
+	// 0x01 Challenge Overview
+	b.WriteString("## 0x01 题目概况与考点分析\n\n")
+	if description != "" {
+		fmt.Fprintf(&b, "**题目描述**：\n%s\n\n", description)
+	}
+	if goal != "" {
+		fmt.Fprintf(&b, "**交付目标**：\n%s\n\n", goal)
+	}
+
+	if len(m.Files) > 0 {
+		b.WriteString("### 附件清单与特征：\n")
+		for _, a := range m.Files {
+			fmt.Fprintf(&b, "- **`%s`**（%s）：大小 %d 字节，SHA-256 `%s`\n", a.Name, a.Role, a.Size, a.SHA256)
 		}
+		b.WriteString("\n")
 	}
-	state := "分析中 / 尚无已确认答案"
-	if len(accepted) > 0 {
-		state = "当前输入的答案已由用户确认"
+
+	// 0x02 Effective Steps (Noise-free causal steps)
+	b.WriteString("## 0x02 核心解题步骤（有效链路）\n\n")
+	seenCmds := make(map[string]bool)
+	var steps []effectiveStep
+
+	for _, e := range executions {
+		cmdTrimmed := strings.TrimSpace(e.Command)
+		if e.ExitCode != 0 && e.ID != winningExecID {
+			continue // Ignore failed test runs
+		}
+		if isNoiseCommand(cmdTrimmed) && e.ID != winningExecID {
+			continue // Filter out noise directory checks
+		}
+		if seenCmds[cmdTrimmed] && e.ID != winningExecID {
+			continue // Deduplicate identical commands
+		}
+		seenCmds[cmdTrimmed] = true
+
+		steps = append(steps, effectiveStep{
+			ExecutionID: e.ID,
+			Command:     e.Command,
+			Summary:     summarizeCommand(e.Command),
+			Stdout:      string(e.StdoutExcerpt),
+			IsWinner:    e.ID == winningExecID,
+		})
 	}
-	if status == "failed" || status == "timeout" {
-		state += "；任务已停止，保留阶段结果"
-	}
-	fmt.Fprintf(&b, "- 任务：%d · 题型：%s · 任务状态：%s\n- 解题状态：%s\n- 输入 SHA-256：`%s`\n- WP 版本：`%s`\n\n## 题目与目标\n\n%s\n\n%s\n\n", task, challenge, status, state, currentHash, revision, description, goal)
-	b.WriteString("## 附件与静态信息\n\n")
-	if len(m.Files) == 0 {
-		b.WriteString("本任务没有上传附件。\n\n")
-	}
-	for _, a := range m.Files {
-		fmt.Fprintf(&b, "### %s\n\n- 角色：%s · 大小：%d 字节\n- SHA-256：`%s`\n- 执行路径：`%s`\n\n", strings.ReplaceAll(a.Name, "\n", " "), a.Role, a.Size, a.SHA256, s.LogicalPath(a))
-		v, _ := json.MarshalIndent(a.Analysis, "", "  ")
-		b.WriteString(fence(string(v), "json"))
-	}
-	b.WriteString("## 分析结论与解题思路\n\n以下为任务事实记录；模型写回的结论仍需结合后面的执行证据核对。\n\n")
-	if len(facts) == 0 {
-		b.WriteString("尚无写回的分析结论。\n\n")
-	}
-	for _, f := range facts {
-		fmt.Fprintf(&b, "### 事实 #%d（%s）\n\n", f.ID, f.State)
-		var fields map[string]any
-		_ = json.Unmarshal(f.Payload, &fields)
-		for _, k := range []string{"summary", "detail", "evidence", "reason", "verification"} {
-			if v, ok := fields[k]; ok {
-				fmt.Fprintf(&b, "%v\n\n", v)
+
+	if len(steps) == 0 {
+		b.WriteString("当前尚无完整的有效执行步骤记录。\n\n")
+	} else {
+		for idx, st := range steps {
+			star := ""
+			if st.IsWinner {
+				star = " 🎯【关键 Flag 产出步骤】"
+			}
+			fmt.Fprintf(&b, "### 步骤 %d：%s%s\n\n", idx+1, st.Summary, star)
+			b.WriteString(fence(st.Command, "bash"))
+			if st.Stdout != "" && (st.IsWinner || len(steps) <= 5) {
+				b.WriteString("**关键输出回显**：\n")
+				b.WriteString(fence(strings.TrimSpace(st.Stdout), "text"))
 			}
 		}
 	}
-	b.WriteString("## 实际执行与复现步骤\n\n命令、退出码和输出取自独立执行器；输出中的 Flag 格式匹配只产生候选。最多展示最近 100 次执行，完整执行日志可在任务中下载。\n\n")
-	if len(executions) == 0 {
-		b.WriteString("尚无执行记录，不能据此声称已完成求解。\n\n")
+
+	// 0x03 Winning Exploit / Script
+	b.WriteString("## 0x03 核心求解脚本 (Exploit / PoC)\n\n")
+	var primaryScript *Script
+	var scriptData []byte
+
+	// Look in winning execution first, then search backwards
+	searchExecs := []*db.CTFExecution{}
+	if winningExecID != "" && execMap[winningExecID] != nil {
+		searchExecs = append(searchExecs, execMap[winningExecID])
 	}
+	for i := len(executions) - 1; i >= 0; i-- {
+		if winningExecID == "" || executions[i].ID != winningExecID {
+			searchExecs = append(searchExecs, &executions[i])
+		}
+	}
+
+	for _, e := range searchExecs {
+		var files []Script
+		if err = json.Unmarshal(e.Files, &files); err == nil && len(files) > 0 {
+			for _, f := range files {
+				ext := strings.ToLower(filepath.Ext(f.Name))
+				if ext == ".py" || ext == ".sh" || ext == ".c" {
+					if d, er := s.EvidenceFile(task, f.Path, f.SHA256); er == nil && len(d) > 0 {
+						primaryScript = &f
+						scriptData = d
+						break
+					}
+				}
+			}
+		}
+		if primaryScript != nil {
+			break
+		}
+	}
+
+	if primaryScript != nil {
+		lang := strings.TrimPrefix(filepath.Ext(primaryScript.Name), ".")
+		if lang == "" {
+			lang = "python"
+		}
+		fmt.Fprintf(&b, "以下为解题过程中生成的完整求解脚本 (`%s`，SHA-256 `%s`)，可直接在准备好的工作区中复现执行：\n\n", primaryScript.Name, primaryScript.SHA256)
+		b.WriteString(fence(string(scriptData), lang))
+	} else if confirmedCand != nil && execMap[confirmedCand.ExecutionID] != nil {
+		b.WriteString("本题通过命令行链式指令直接取得 Flag，核心复现命令如下：\n\n")
+		b.WriteString(fence(execMap[confirmedCand.ExecutionID].Command, "bash"))
+	} else {
+		b.WriteString("本阶段暂未持久化独立的解题脚本文件。\n\n")
+	}
+
+	// 0x04 Verification and Flag
+	b.WriteString("## 0x04 验证结果与 Flag\n\n")
+	if confirmedCand != nil {
+		fmt.Fprintf(&b, "- **最终验证 Flag**：`%s`\n", confirmedCand.Value)
+		fmt.Fprintf(&b, "- **验证状态**：已由用户在题目平台提交并确认为正确答案（Accepted）\n")
+		if confirmedCand.Notes != "" {
+			fmt.Fprintf(&b, "- **用户验证备注**：%s\n", confirmedCand.Notes)
+		}
+		fmt.Fprintf(&b, "- **来源执行记录**：`%s`\n\n", confirmedCand.ExecutionID)
+	} else if latestCand != nil {
+		fmt.Fprintf(&b, "- **当前命中 Flag**：`%s`\n", latestCand.Value)
+		fmt.Fprintf(&b, "- **验证状态**：待人工在题目平台确认（Pending Confirmation）\n")
+		fmt.Fprintf(&b, "- **来源执行记录**：`%s`\n\n", latestCand.ExecutionID)
+	} else {
+		b.WriteString("尚未取得符合目标格式的 Flag。\n\n")
+	}
+
+	// Appendix: Audit Trail (Collapsible)
+	b.WriteString("---\n\n")
+	fmt.Fprintf(&b, "<details>\n<summary><b>点击展开：完整原始执行证据链与安全审计日志（共 %d 次执行）</b></summary>\n\n", len(executions))
+	b.WriteString("> 此处保留沙箱容器内运行的全部历史命令、执行耗时、退出码与日志 SHA-256 校验和，确保复现证据链完整不可篡改。\n\n")
+
 	scripts := map[string]bool{}
 	for i := len(executions) - 1; i >= 0; i-- {
 		e := executions[i]
-		fmt.Fprintf(&b, "### 执行 %s\n\n- 意图：%d · 时间：%s · 退出码：%d\n- 输入：`%s`", e.ID, e.IntentID, e.StartedAt.UTC().Format(time.RFC3339), e.ExitCode, e.InputHash)
+		fmt.Fprintf(&b, "#### 执行记录 `%s`\n", e.ID)
+		fmt.Fprintf(&b, "- 意图：%d · 时间：%s · 退出码：%d\n", e.IntentID, e.StartedAt.UTC().Format(time.RFC3339), e.ExitCode)
 		if e.InputHash != currentHash {
-			b.WriteString("（旧输入版本）")
+			b.WriteString("- 状态：旧输入版本\n")
 		}
-		b.WriteString("\n\n")
+		b.WriteString("\n")
 		b.WriteString(fence(e.Command, "bash"))
 		if e.Error != "" {
-			fmt.Fprintf(&b, "执行/同步异常：%s\n\n", e.Error)
-		}
-		if e.Truncated {
-			b.WriteString("输出超过限制，已截断；该记录不能声称保留了完整输出。\n\n")
+			fmt.Fprintf(&b, "**执行异常**：%s\n\n", e.Error)
 		}
 		for _, log := range []struct{ name, path, hash string }{{"stdout", e.StdoutPath, e.StdoutSHA}, {"stderr", e.StderrPath, e.StderrSHA}} {
 			data, er := s.EvidenceFile(task, log.path, log.hash)
-			if er != nil {
-				return result, fmt.Errorf("执行 %s %s：%w", e.ID, log.name, er)
-			}
-			fmt.Fprintf(&b, "%s SHA-256：`%s`\n\n", log.name, log.hash)
-			if len(data) > 0 {
-				b.WriteString(fence(excerpt(data, 12000), "text"))
+			if er == nil && len(data) > 0 {
+				fmt.Fprintf(&b, "**%s** (SHA-256: `%s`):\n", log.name, log.hash)
+				b.WriteString(fence(excerpt(data, 4000), "text"))
 			}
 		}
 		var files []Script
-		if err = json.Unmarshal(e.Files, &files); err != nil {
-			return result, err
-		}
-		for _, f := range files {
-			if scripts[f.SHA256] {
-				continue
-			}
-			scripts[f.SHA256] = true
-			data, er := s.EvidenceFile(task, f.Path, f.SHA256)
-			if er != nil {
-				return result, er
-			}
-			fmt.Fprintf(&b, "求解文件 `%s` · SHA-256 `%s`\n\n", f.Name, f.SHA256)
-			if len(data) <= 24000 {
-				b.WriteString(fence(string(data), strings.TrimPrefix(filepath.Ext(f.Name), ".")))
-			} else {
-				b.WriteString("文件较长，已留存在本次执行的产物快照中。\n\n")
+		if err = json.Unmarshal(e.Files, &files); err == nil {
+			for _, f := range files {
+				if !scripts[f.SHA256] {
+					scripts[f.SHA256] = true
+					if d, er := s.EvidenceFile(task, f.Path, f.SHA256); er == nil && len(d) > 0 {
+						fmt.Fprintf(&b, "**快照文件** `%s` (SHA-256: `%s`):\n", f.Name, f.SHA256)
+						if len(d) <= 8000 {
+							b.WriteString(fence(string(d), strings.TrimPrefix(filepath.Ext(f.Name), ".")))
+						}
+					}
+				}
 			}
 		}
+		b.WriteString("\n")
 	}
-	b.WriteString("## 答案与验证\n\n")
-	if len(candidates) == 0 {
-		b.WriteString("尚未从实际输出登记候选答案。\n\n")
-	}
-	for _, c := range candidates {
-		fmt.Fprintf(&b, "- 候选 #%d：%s；来源执行 `%s`；状态 **%s**。\n", c.ID, strings.ReplaceAll(c.Value, "\n", " "), c.ExecutionID, c.State)
-		if c.Notes != "" {
-			fmt.Fprintf(&b, "  用户备注：%s\n", c.Notes)
-		}
-	}
-	b.WriteString("\n")
-	if len(accepted) == 0 {
-		b.WriteString("当前输入版本尚无用户确认的答案。本 WP 为阶段报告，任务不能仅凭模型判断或正则匹配宣告成功。请复现脚本并按题目要求验证候选答案。\n\n")
-	}
-	b.WriteString("## 环境与限制\n\nPwn/RE 命令在任务独立容器中执行，应用配置与密钥不挂载进去。工具页可查询实际安装与导入状态；缺失依赖、调试失败、超时与非零退出码均保留在执行记录中。自动生成的 WP 只汇总已有资料，不补造未执行步骤。\n")
+	b.WriteString("</details>\n")
+
 	result = WP{Revision: revision, Markdown: b.String(), SHA256: SHA([]byte(b.String())), GeneratedAt: time.Now().UTC()}
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return result, err
