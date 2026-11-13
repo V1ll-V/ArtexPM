@@ -227,7 +227,9 @@ func proxyEnv(proxyAddr, caCert string) []string {
 // prompt, seeded into agent_prompts. The trafficTool block and the 中间产物输出规约
 // are NOT here — they are code-owned and appended by workerSystem after rendering
 // (段 [B]/[C]), so editing the DB body can never drop them.
-const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系统的"执行者"(work agent)。你领到【一条意图】(一句话探索方向)，唯一职责：**完成这一条意图、把发现写回知识图谱、然后停止返回。**
+const workerDefaultTmpl = `【思考语言规范】你的所有内部思考推理过程（Thinking/Reasoning）、分析判断与步骤说明请全程使用简体中文（命令、代码、路径与英文专有术语除外）。
+
+你是一个网络安全平台授权渗透测试系统的"执行者"(work agent)。你领到【一条意图】(一句话探索方向)，唯一职责：**完成这一条意图、把发现写回知识图谱、然后停止返回。**
 
 **边界（红线）**：
 1. **只做你领到的这一条意图**。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**。
@@ -313,6 +315,28 @@ func intentAssetIDs(intent *db.Node) []int64 {
 	return p.AssetIDs
 }
 
+func intentPhase(intent *db.Node) string {
+	if intent == nil {
+		return ""
+	}
+	var p struct {
+		Phase string `json:"phase"`
+	}
+	if err := json.Unmarshal(intent.Payload, &p); err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(p.Phase))
+}
+
+func ctfMaxTurnsForPhase(ctfMode bool, phase string, configured int) int {
+	if ctfMode && phase == "recon" {
+		if configured == 0 || configured > 16 {
+			return 16
+		}
+	}
+	return configured
+}
+
 func renderIntentTask(intent *db.Node) string {
 	return fmt.Sprintf("\n\n【你领到的意图（本次唯一任务：只做这一条、只产生事实、做完即停）】：\n%s\n意图 id: %d（写回 record_fact / report_finding 时传它）", string(intent.Payload), intent.ID)
 }
@@ -396,8 +420,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
 	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
 	ctfMode := isCTFContext(ctx)
+	phase := ""
 	if ctfMode {
 		sysBody = ctfWorkerSystem
+		phase = intentPhase(intent)
 	}
 	inputs, inputErr := taskInputContext(w.workDir, ts, taskID, intent.ID)
 	if inputErr != nil {
@@ -428,7 +454,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		}
 	}
 	if ctfMode {
-		sysBody += "\n\n执行当前 CTF 意图，得到候选 Flag 后立即交接并结束。"
+		if phase == "recon" {
+			sysBody += "\n\n（请全程使用简体中文进行内部思考和步骤说明）【本意图阶段定位：仅前置侦察（RECON-ONLY）】你只负责完成本意图中明确要求的环境搭建、保护识别或远程握手/菜单/PoW 探测并调用 record_fact 写回完整路径与协议信息；严禁在本意图内顺手做完整逆向求解、下载无关大型依赖或自己编写 exploit 冲向 Flag，取得目标线索并写完 fact 后请立即结束本轮交还给 Planner。"
+		} else {
+			sysBody += "\n\n（请全程使用简体中文进行内部思考和步骤说明）执行当前 CTF 意图：先检查已有 fact 中的工作目录/ld-libc 环境与远程协议结论并直接复用（勿重复解包或重复下载 libc）；在同一次上下文中动静结合推进，在关键步骤与取得候选 Flag 时务必通过 record_fact 写回技术事实，得到候选 Flag 后立即交接并结束。"
+		}
 	} else {
 		sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
 	}
@@ -469,7 +499,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
 		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
 		WorkingDir: runDir,
-		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
+		MaxTurns:   ctfMaxTurnsForPhase(ctfMode, phase, w.maxTurns), // recon intent capped so it cannot drift into solo exploit
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,
@@ -531,6 +561,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		if len(s.Messages()) > 0 && message == "" {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 			input = "继续执行。"
+			if ctfMode && ts != nil {
+				if cands, cerr := ts.Database().CTFCandidates(ctx, taskID); cerr == nil && len(cands) > 0 && cands[0].State == "rejected" {
+					input = fmt.Sprintf("上一轮候选 Flag `%s` 已被用户否定（备注：%s），请勿重复提交该值，请据此调整策略并继续执行。", cands[0].Value, cands[0].Notes)
+				}
+			}
 		} else if len(s.Messages()) > 0 {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 		}
@@ -556,6 +591,23 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
 	if ctfGate != nil && ctfGate.waited.Load() && err == nil {
 		reason = ReasonCTFSubmission
+		if ts != nil && tsx.Writes().Facts == 0 {
+			if cand, cerr := ts.Database().PendingCTFSubmission(ctx, taskID); cerr == nil && cand != nil {
+				detail := fmt.Sprintf("执行记录 %s 捕获候选 Flag `%s`", cand.ExecutionID, cand.Value)
+				if ex, exErr := ts.Database().CTFExecution(ctx, taskID, cand.ExecutionID); exErr == nil && strings.TrimSpace(ex.Command) != "" {
+					detail = fmt.Sprintf("执行命令 `%s` 捕获候选 Flag `%s`", truncOutput(strings.TrimSpace(ex.Command), 240), cand.Value)
+				}
+				if fid, ferr := ts.AddNode("fact", map[string]any{
+					"summary":    fmt.Sprintf("捕获候选 Flag：%s", cand.Value),
+					"detail":     detail,
+					"evidence":   fmt.Sprintf("execution=%s", cand.ExecutionID),
+					"confidence": "observed",
+				}, 5, "confirmed", name, nil); ferr == nil && fid > 0 {
+					_ = ts.Link(intent.ID, db.RelYields, fid)
+					tsx.writes.Facts++
+				}
+			}
+		}
 	}
 	return reason, tsx.Writes(), err
 }

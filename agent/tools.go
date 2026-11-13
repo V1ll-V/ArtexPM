@@ -415,11 +415,13 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	all, _ := t.ts.ListByKind(db.KindIntent, 300)
-	var running, recentDone []*db.Node
+	var running, paused, recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
 		case "running":
 			running = append(running, n)
+		case "paused":
+			paused = append(paused, n)
 		case "done", "blocked", "exhausted":
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
@@ -428,6 +430,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
+	out["paused_intents"] = compactIntents(paused, parentsOf, yieldsOf)
+	out["paused_intents_total"] = len(paused)
 	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
 	// 平行命名——后者只是它的最新窗口截断视图。两键并排即自描述："看到的是 N/总数"，
 	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
@@ -1099,6 +1103,7 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 // intentItem 是 add_intent 批量/单条的一条探索方向。
 type intentItem struct {
 	Summary   string            `json:"summary"`
+	Phase     string            `json:"phase"`
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
@@ -1144,6 +1149,26 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		}
 	}
 	payload := map[string]any{"summary": it.Summary}
+	phase := strings.ToLower(strings.TrimSpace(it.Phase))
+	if phase != "" {
+		payload["phase"] = phase
+	}
+	if t.ts != nil && phase == "exploit" {
+		if mode, challenge, _, err := t.ts.TaskInputMetadata(); err == nil && mode == "ctf" {
+			ch := strings.ToLower(strings.TrimSpace(challenge))
+			if ch == "pwn" || ch == "reverse" {
+				existing, _ := t.ts.ListByKind(db.KindIntent, 100)
+				for _, en := range existing {
+					if en.State != "open" && en.State != "running" && en.State != "paused" {
+						continue
+					}
+					if strings.EqualFold(intentPhase(en), "exploit") {
+						return 0, fmt.Errorf("当前 %s 任务已存在处于 %s 状态的 phase=\"exploit\" 主攻意图 #%d，严禁在 Pwn/Reverse 中并跑多条 exploit 主线。请等待或查看该意图执行情况（暂停中可通知/继续，或在明确停止后再续派），切勿重复派发", ch, en.State, en.ID)
+					}
+				}
+			}
+		}
+	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
@@ -1171,8 +1196,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/phase/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
+			"phase":      str("阶段标记（可选）：'recon' 仅限轻量环境准备/文件保护检查/远程握手抓菜单与PoW（拿齐 fact 即停，严禁越界深挖或冲 Flag）；'exploit' 动静结合深度分析与利用求解；留空默认标准执行。"),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),

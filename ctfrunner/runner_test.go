@@ -111,3 +111,44 @@ func TestRunnerRequiresSecret(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestCopyWorkspaceSkipsOversizedFile(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		tw := tar.NewWriter(pw)
+		bigSize := int64(64<<20 + 1024)
+		_ = tw.WriteHeader(&tar.Header{Name: "work/huge.docx", Typeflag: tar.TypeReg, Mode: 0600, Size: bigSize})
+		_, _ = io.CopyN(tw, zeroReader{}, bigSize)
+		small := []byte("print('flag{ok}')\n")
+		_ = tw.WriteHeader(&tar.Header{Name: "work/solve.py", Typeflag: tar.TypeReg, Mode: 0600, Size: int64(len(small))})
+		_, _ = tw.Write(small)
+		_ = tw.Close()
+		_ = pw.Close()
+	}()
+	var out bytes.Buffer
+	if err := copyWorkspace(&out, pr); err != nil {
+		t.Fatalf("copyWorkspace failed: %v", err)
+	}
+	tr := tar.NewReader(&out)
+	var names []string
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, h.Name)
+	}
+	if len(names) != 1 || names[0] != "solve.py" {
+		t.Fatalf("expected only solve.py, got %v", names)
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}

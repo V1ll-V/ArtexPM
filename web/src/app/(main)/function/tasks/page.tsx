@@ -3064,7 +3064,7 @@ function CreateTaskSheet({
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   const [mode, setMode] = React.useState<"pentest" | "ctf">("pentest");
-  const [challengeType, setChallengeType] = React.useState<"auto" | "web" | "pwn" | "reverse">("auto");
+  const [challengeType, setChallengeType] = React.useState<"auto" | "web" | "pwn" | "reverse" | "crypto" | "misc">("auto");
   const [uploading, setUploading] = React.useState(false);
   const [attachmentDraft, setAttachmentDraft] = React.useState("");
   const sheetContentRef = React.useRef<HTMLDivElement>(null);
@@ -3203,9 +3203,11 @@ function CreateTaskSheet({
                     onChange={(e) => setChallengeType(e.target.value as typeof challengeType)}
                   >
                     <option value="auto">自动分析</option>
-                    <option value="web">Web</option>
-                    <option value="pwn">Pwn</option>
-                    <option value="reverse">RE / Reverse</option>
+                    <option value="web">Web 安全</option>
+                    <option value="pwn">Pwn 二进制漏洞利用</option>
+                    <option value="reverse">Reverse / 逆向工程</option>
+                    <option value="crypto">Crypto / 密码学</option>
+                    <option value="misc">Misc / 杂项安全</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
                     沿用任务规划、执行和验收流程。可只提供附件；执行所需工具和运行环境需已配置。

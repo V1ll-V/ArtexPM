@@ -860,6 +860,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/ctf/tools", s.ctfToolsStatus)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/wp", s.ctfWP)
 	mux.HandleFunc("POST /api/tasks/{id}/ctf/wp", s.ctfWP)
+	mux.HandleFunc("POST /api/tasks/{id}/ctf/wp/optimize", s.ctfOptimizeWP)
+	mux.HandleFunc("POST /api/tasks/{id}/ctf/wp/reset", s.ctfResetWP)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/evidence", s.ctfEvidence)
 	mux.HandleFunc("POST /api/tasks/{id}/ctf/candidates/{candidateID}", s.decideCTFFlag)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/executions/{executionID}/log", s.ctfExecutionLog)

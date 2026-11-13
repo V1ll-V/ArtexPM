@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -62,6 +63,7 @@ func (d *DB) TaskRuntimeState(ctx context.Context, id int64) (out ClosingState, 
 
 type closingTask struct {
 	status, reason, basis, goal string
+	mode, challengeType         string
 	epoch, closingEpoch, expID  int64
 	paused, queued, expired     bool
 	deleted                     sql.NullTime
@@ -69,9 +71,9 @@ type closingTask struct {
 }
 
 func closingTaskTx(ctx context.Context, tx *sql.Tx, id int64) (r closingTask, err error) {
-	err = tx.QueryRowContext(ctx, `SELECT status,closing_reason,closing_basis,COALESCE(goal,''),run_epoch,closing_run_epoch,
+	err = tx.QueryRowContext(ctx, `SELECT status,closing_reason,closing_basis,COALESCE(goal,''),mode,COALESCE(challenge_type,''),run_epoch,closing_run_epoch,
  exploration_id,paused,queued,COALESCE(deadline_at<=clock_timestamp(),false),deleted_at,deadline_at FROM tasks WHERE id=$1 FOR UPDATE`, id).
-		Scan(&r.status, &r.reason, &r.basis, &r.goal, &r.epoch, &r.closingEpoch, &r.expID, &r.paused, &r.queued, &r.expired, &r.deleted, &r.deadline)
+		Scan(&r.status, &r.reason, &r.basis, &r.goal, &r.mode, &r.challengeType, &r.epoch, &r.closingEpoch, &r.expID, &r.paused, &r.queued, &r.expired, &r.deleted, &r.deadline)
 	return
 }
 
@@ -301,6 +303,21 @@ func (d *DB) ClaimIntentGuarded(ctx context.Context, taskID, intentID int64, own
 		}
 		if e = LockTaskEvidenceTx(tx, taskID); e != nil {
 			return e
+		}
+		if strings.EqualFold(r.mode, "ctf") && (strings.EqualFold(r.challengeType, "pwn") || strings.EqualFold(r.challengeType, "reverse")) {
+			var targetPhase string
+			if e = tx.QueryRowContext(ctx, `SELECT lower(COALESCE(payload->>'phase','')) FROM exploration_nodes WHERE id=$1 AND exploration_id=$2`, intentID, r.expID).Scan(&targetPhase); e != nil && !errors.Is(e, sql.ErrNoRows) {
+				return e
+			}
+			if targetPhase == "exploit" {
+				var active bool
+				if e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state IN ('running','paused') AND id<>$2 AND lower(COALESCE(payload->>'phase',''))='exploit')`, r.expID, intentID).Scan(&active); e != nil {
+					return e
+				}
+				if active {
+					return nil
+				}
+			}
 		}
 		result, e := tx.ExecContext(ctx, `UPDATE exploration_nodes SET state='running',owner=$2 WHERE id=$1 AND kind='intent' AND state='open' AND exploration_id=$3`, intentID, owner, r.expID)
 		if e != nil {

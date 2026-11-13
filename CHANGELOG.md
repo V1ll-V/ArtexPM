@@ -2,7 +2,106 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [Unreleased] - 2026-11-02
+## [0.8.0] - 2026-11-13
+
+### 新增与优化
+
+- **Pwn / Reverse 分阶段侦察与“动静合一”主攻编排体系**：
+  - **跨意图共享工作区与工具容器复用（`ctf.Service.resolveScope`）**：`pwn` 与 `reverse` 题型同一任务下跨意图共享 `/work` 目录、`session` 容器与执行互斥锁，消除重复解包、重复反编译与重复 `patchelf`；`web`/`misc`/`crypto` 保持意图隔离的同时通过 `seedNonSharedWorkDir` 自动继承首个工作区的解包产物。
+  - **双层主攻互斥与暂停保护**：Planner 派发检查（`agent/tools.go`）与数据库 `ClaimIntentGuarded` 协同限制 `pwn`/`reverse` 同时仅允许 1 条 `phase="exploit"` 主攻意图推进（仍允许并发轻量 `recon`），防止多 Worker 并行抢跑与劫持人工暂停/对话指导中的主攻意图；探索图概览新增 `paused_intents` 感知。
+  - **新增 `ctf_pwn_triage`（`ctf-pwn-triage`）综合起手测绘工具与离线 glibc 缓存池**：一步采集 `file`、架构、`stripped`、`checksec`、导入符号、Protobuf/Seccomp/堆特征及 `libc` GNU 版本/BuildID，匹配工具镜像预置 `/opt/ctf/glibc` 离线库并自动 `patchelf` 生成 `*_patched`；工具镜像新增 `protobuf-compiler`、`libprotobuf-c-dev` 与离线 glibc 构建脚本，`doctor.py` 扩展至 41 项自检。
+  - **反编译优先与严格角色隔离**：增强 Planner/Worker 分阶段提示词，引导 stripped/复杂二进制优先调用 `ctf_pwn_triage` 与 `ctf_decompile`（Ghidra 缓存反编译），强化中文内部思考规范与真实执行证据引用。
+- **多 Flag 持续求解与一键智能 WP 排版优化**：
+  - 支持一题多 Flag 增量突破：跟踪 `goals_total`/`goals_met`/`goals_open`，支持部分确认后继续探索剩余目标并聚合输出总览表格与全量 PoC。
+  - 新增一键 WP 智能优化（`/api/tasks/{id}/ctf/wp/optimize`）：按因果路径精简调试噪音、提炼解题总览与干净 PoC；WP 生成器升级至 `v0.8.0-clean-wp`。
+- **执行与 Flag 稳健性修复**：
+  - **NUL 字节清洗**：`utf8Clean`、`jsonbClean` 与 `excerpt` 自动剥离命令/输出/环境中的 `\x00`，修复裸二进制泄露导致 PostgreSQL UTF-8/JSONB 入库失败问题。
+  - **假 Flag 防误触发与否定反馈延续**：`ExtractFlags` 拒绝紧邻标识符截断子串，新增 `IsSelfConstructedMockFlag` 避免测试占位符误触发提交等待；规范本地测试统一使用 `__LOCAL_PWN_OK__` 哨兵；候选被否定后自动向续跑 Worker 注入否定值与备注避免重复提交。
+  - **DNS 探测容错**：`probe_target.py` 与 `ctf/probe.go` 增加多轮 DNS `getaddrinfo` 重试与 `getent ahostsv4` 兜底，缓解容器 DNS 瞬时抖动。
+
+## [0.7.0] - 2026-11-12
+
+### 新增与优化
+
+- **CTF 专精流量分析工具体系（`ctf_pcap_analyze` / `ctf-pcap`）**：
+  - **多模式结构化 PCAP 抓包分析引擎**：
+    - `summary`：基于 capinfos 与 tshark 提取捕获元数据、协议树（Protocol Hierarchy）及通信双方 IP 会话流。
+    - `http`：深度审计 HTTP 请求与响应流，自动提取请求方法、URI、状态码、Content-Type 及 Authorization 凭据与 Cookie。
+    - `dns`：提取 DNS 解析记录并自动嗅探异常超长子域名（识别 DNS Tunneling 隐蔽隧道与数据外发）。
+    - `streams` / `stream`：支持全量 TCP 会话流统计以及按 stream_id 完整重组追踪双向会话对话（follow stream）。
+    - `export`：全自动导出流量包内传输的 Web/HTTP 对象文件到工作区，计算哈希并扫描 Flag。
+    - `search`：全包跨帧搜索关键词或正则（自动关联帧号、协议与上下文）。
+    - `icmp`：自动提取 ICMP 数据段有效载荷文本，识别隐写通道。
+  - **环境依赖补充**：
+    - 工具镜像补充预装 `scapy` 与 `pyshark` Python 依赖。
+    - 工具箱新增预装 `tcpdump`。
+    - 专用工具 `ctf_pcap_analyze` 接入 Agent 决策流，输出中的 Flag 自动识别捕获并登记为候选。
+- **WP 报告引擎扩展**：
+  - 自动归类识别 PCAP、tshark、scapy、tcpdump 操作为“流量包结构化分析与传输对象/会话提取”关键步骤。
+
+## [0.6.0] - 2026-11-12
+
+### 新增与优化
+
+- **规范化比赛级 CTF Write-up（WP）自动整理与因果剪枝**：
+  - 自动识别并过滤无直接因果关系的探索性命令（如 `ls`、`pwd` 等）与报错重试指令，仅保留核心有效解题路径。
+  - 规范化结构输出：包含赛题元数据、解题核心思路概要、关键有效操作步骤、核心 PoC/利用脚本提炼以及已确认 Flag 展示。
+  - 审计流折叠保留：在 Markdown `<details>` 中折叠保存所有原始命令执行 ID、SHA-256 与日志流水，满足复核与安全审计需求。
+  - Flag 确认自动触发后台异步刷新与重新排版 WP。
+
+## [0.5.1] - 2026-11-09
+
+### 新增与优化
+
+- **CTF 自动化基准测试套件与 Ghidra 反编译缓存优化（节点 R3）**：
+  - **12 道跨学科 CTF 自动化基准套件（`benchmarks/run_benchmark.py` / `ctf/TestCTFBenchmarkSuite`）**：覆盖 Crypto（RSA 低指数、仿射模逆、密钥流异或）、Reverse（ELF 反混淆、UPX 脱壳、Z3 约束求解）、Pwn（ret2win 栈溢出、PTY 菜单多轮交互、远程 PoW 靶机）、Forensics（EXIF 元数据提取、foremost+7z 固件雕刻）及 Web（HTTP Header/Cookie 绕过），支持会话结束后自动销毁测试容器。
+  - **Ghidra Headless 持久化分析缓存（`ctf_decompile`）**：按目标二进制 SHA-256 在容器 `/tmp/ghidra_<hash>` 建立持久工程，首次导入分析后，后续反编译不同函数自动使用 `-process <bin> -noanalysis` 跳过重复导入与全量自动分析，且缓存不混入 `/work` 工作区归档。
+- **远程靶机探测与交互会话体系（节点 R2）**：
+  - **远程靶机连通性与协议探测器（`ctf_probe_target` / `ctf-probe`）**：
+    - 支持灵活解析常见靶机格式（`nc <host> <port>`、`<host>:<port>`、`http(s)://...`）。
+    - 快速测定 DNS 解析耗时、TCP 握手 RTT（毫秒级 Ping）、TLS/SSL 自动识别、HTTP 协议状态与 Server/Title 提取。
+    - 自动检测 Proof-of-Work（PoW）防爆破挑战特征（支持 `sha256(xxxx + ??) == yyyy`、`md5(...)`、`hashcash` 等常见 CTF 防爆破模式）。
+    - 自动识别交互菜单（`1. ... 2. ... Choice:`）与输入 Prompt。
+    - 自动生成即用型 pwntools (`remote('host', port, ssl=True)`)、nc 与 curl 命令建议。
+  - **持久交互式终端 PTY 会话体系（`ctf_session_*`）**：
+    - 在执行器层实现基于 Linux PTY（伪终端）的守护进程管理器，全面覆盖多轮交互型 CTF 挑战（Pwn 菜单交互、远程 shell 交互、gdb 动态调试等）。
+    - 提供 `ctf_session_start`（创建 PTY 会话）、`ctf_session_send`（多轮输入投递，支持 utf-8/base64 与换行自动补齐）、`ctf_session_read`（基于文件偏移量的非阻塞/增量长轮询输出读取）、`ctf_session_close`（会话终止与进程组优雅退出）。
+    - 交互会话产生的所有增量输出均自动接入 Flag 提取器（`ExtractFlags`），流式吐出的 Flag 自动捕获并关联 `execution_id` 登记至 `ctf_candidates` 数据库候选表。
+- **后台异步长任务与日志轮询机制（节点 R1）**：
+  - 新增 `ctf_run_background`、`ctf_job_status`、`ctf_job_stop` 工具，突破 300 秒单次执行超时上限。
+  - 后台长任务输出自动提取并登记 Flag 候选。
+- **Flag 候选自动识别增强**：
+  - 新增环境变量 `ARTEX_CTF_FLAG_PREFIXES`，支持自定义全局比赛 Flag 前缀（如 `hgame,DASCTF,moectf` 等，逗号分隔），自动忽略非法字符。
+  - 新增输出内容中 Base64 和 Hex 编码串的自动捕获与解码，若解码后符合 Flag 格式则自动登记为候选，普通编码字符串不被误判。
+- **命令超时容器保护机制**：
+  - 工具命令超时改由容器内 `timeout -k 3` 控制，超时仅终止命令进程组并返回标准退出码 124 与友好提示，**不再销毁工具容器**；临时文件、调试环境和工作区文件完整保留。
+- **CTF 工具链扩展（密码学与取证）**：
+  - 新增密码学与数学库：`pycryptodome` (4.4.0)、`gmpy2` (2.3.2)、`sympy` (1.14.0)、`numpy` (2.5.4)、`pillow` (13.0.0)。
+  - 新增取证与隐写工具：`binwalk` (2.4.3)、`exiftool` (13.25)、`tshark` (4.4.19)、`steghide` (0.5.1)、`p7zip-full` (25.01)、`foremost`。
+  - 新增二进制与漏洞工具：`seccomp-tools` (1.7.1)、`UPX` (4.2.4)。
+  - 更新诊断脚本与前端工具卡片，展示 33 项安全工具就绪状态（涵盖 Pwn / RE / Crypto / Forensics）。
+
+## [0.6.0] - 2026-11-12
+
+- **CTF 解题报告（WP）规范化与智能去噪整理**：
+  - 彻底重构 WP 生成逻辑，告别无差别的调试命令流水账堆叠，按竞赛级标准结构输出（题目概况、有效解题步骤、核心求解脚本 PoC / Exploit、Flag 验证结论）。
+  - 有效链路因果回溯（Path Pruning）：自动过滤掉 90% 的探路、失败命令与冗余环境排查，仅提取真正推动 Flag 产出的有效操作步骤。
+  - 用户确认 Flag（`accept`）后自动触发重新生成最新精炼报告，并将原始底层执行记录与 SHA-256 审计链完整保留在附录可折叠区域中，兼顾极致的可读性与严谨的证据溯源。
+- **全赛题类型支持与专精求解提示词体系**：
+  - 赛题分类扩充为全套五大类，正式支持 `Misc`（杂项安全）与 `Crypto`（密码学）。
+  - 为 Web、Pwn、Reverse、Crypto、Misc 提供深度定制的题型专属方法论提示词模板，自动分析模式下支持根据附件特征启发式推断题型。
+- **工作区同步优化与配额提升**：
+  - 工作区配额提升至 512 MiB / 8192 文件，并支持环境变量动态扩展。
+  - 单个超过 64 MiB 的大型解压临时文件自动豁免宿主双向同步，避免命令锁死。
+  - 临时 Staging 目录原子镜像，自动修剪容器内已删除文件，彻底避免删除文件复活。
+
+## [0.5.0] - 2026-11-08
+
+- 新增 CTF 任务、附件识别与 ZIP 解压、独立 Pwn/RE 执行器、执行证据和 WP；归档格式 5 保留执行与答案记录。
+- CTF 使用专用提示词，找到候选 Flag 后停止自动派活和后续模型请求，交给用户提交平台验证。
+- 支持确认 Flag 并完成 CTF 任务，也可仅确认以保留其他目标；撤销确认或更新输入会撤销相应完成结果。
+- 通用任务执行不再受可选漏洞验收与报告开关限制，并提供验收／报告模型选择入口。
+- 修复无参数工具的空属性定义引发的模型接口 400；品牌、包版本和预览构建统一到 v0.5.0。
 
 - 未通过验收的发现自动提供候选材料报告，展示原始复现材料、候选主张和证据缺口，详情可复制、Markdown 可导出；不冒充正式确认报告。
 - 验收只要求结论成立所必需的对照，支持证据充分的较小范围；对缺口聚焦列举，提示规划先复用本地证据，避免无变化反复补验。

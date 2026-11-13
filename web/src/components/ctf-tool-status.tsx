@@ -27,7 +27,7 @@ export function CTFToolStatusCard() {
       <CardHeader className="flex-row items-center justify-between">
         <CardTitle className="flex items-center gap-2 text-sm">
           <WrenchIcon className="size-4" />
-          Pwn / RE 工具环境
+          CTF 解题工具环境（Pwn / RE / Crypto / Forensics）
         </CardTitle>
         <Button size="sm" variant="outline" disabled={loading} onClick={refresh}>
           <RefreshCwIcon className={loading ? "animate-spin" : ""} />
@@ -36,8 +36,7 @@ export function CTFToolStatusCard() {
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <p className="text-muted-foreground">
-          GDB · pwntools · Ghidra · radare2 · ROPgadget · ropper · one_gadget · pwninit · angr / Z3 · Unicorn · Keystone
-          · QEMU。检查会启动独立容器，确认工具可执行与模块可导入。
+          Pwn / RE（GDB、pwntools、Ghidra、radare2、angr/Z3 等） · 密码学（PyCryptodome、gmpy2、sympy 等） · 取证与隐写（binwalk、tshark、exiftool、steghide 等）。检查会启动独立容器确认可用性。
         </p>
         {status && (
           <>

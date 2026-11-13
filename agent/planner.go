@@ -296,7 +296,9 @@ func renderGraphOverview(data map[string]any) string {
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
 // seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间产物输出规约
 // tail is code-owned (artifactSpec) and appended by plannerSystem after rendering.
-const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系统的"规划者"，被频繁唤醒（图一变就唤醒）。职责：读态势 → 判目标 → **只在确有未被覆盖的新方向时**补充探索意图。你是规划者、不是执行者：本轮所有产物只能是【生成/说清意图】或【判定目标】，绝不在 plan 里把活干了。
+const plannerDefaultTmpl = `【思考语言规范】你的内部思考推理过程（Thinking/Reasoning）与决策分析请全程使用简体中文（命令、URL、标识符与英文专有术语除外）。
+
+你是一个网络安全平台授权渗透测试系统的"规划者"，被频繁唤醒（图一变就唤醒）。职责：读态势 → 判目标 → **只在确有未被覆盖的新方向时**补充探索意图。你是规划者、不是执行者：本轮所有产物只能是【生成/说清意图】或【判定目标】，绝不在 plan 里把活干了。
 
 任务目标：{{.Goal}}
 
@@ -384,7 +386,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
-	ctx, base = ctfBase(ctx, p.workDir, ts, taskID, 0, base)
+	ctx, base = ctfBaseForPlanner(ctx, ts, base)
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
@@ -403,10 +405,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
 	ctfMode := isCTFContext(ctx)
+	inputRole := "planner"
 	if ctfMode {
 		sysBody = fmt.Sprintf(ctfPlannerSystem, goal)
 	}
-	inputs, inputErr := taskInputContext(p.workDir, ts, taskID, 0)
+	inputs, inputErr := taskInputContextForRole(p.workDir, ts, taskID, 0, inputRole)
 	if inputErr != nil {
 		return false, "", inputErr
 	}
@@ -433,7 +436,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		DeferredTools:   def.Deferred,
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
-		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
+		EnableWebFetch:  !ctfMode, // CTF 模式下 Planner 禁止自行抓取目标页面，必须通过 add_intent 派给 Worker
 		WebFetchProxy:   p.proxyAddr,
 		WebFetchCACert:  p.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
@@ -490,7 +493,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
 		renderPlannerTodos(opts.Todos.List())
 	if ctfMode {
-		input = "根据当前 CTF 状态推进最短解法：无候选且需要新方向时最多派一个意图；有候选立即等待用户；已确认时只使用已有证据证明对应目标。" + situational + renderPlannerTodos(opts.Todos.List())
+		input = "（请全程使用简体中文进行内部思考与规划）根据当前 CTF 状态与题型特征通过 add_intent 协调 Worker 推进最短解法：若有未确认的候选 Flag 则等待用户；若已有 Flag 已确认，用已有证据标记对应分目标达成（prove_goal）；若图谱尚无任何探索意图/事实，请按题型规律开局派发（Web/Misc 可一次派发 2~3 个平行侦察意图；Pwn/Reverse 先派 1~2 个标明 phase=\"recon\" 的轻量前置侦察意图——只做解包/保护检查/环境就绪及远程握手抓菜单与 PoW，待收齐 fact 后再传 parent_ids 派 1 个动静合一主攻意图）；若 Worker 刚写回新事实，请传 parent_ids 派生下游利用意图，形成连贯探索链路，严禁重复派发同一方向或在 Pwn 主线尚未失败前并跑重复 EXP；若仍有未达成目标且当前无 open/running 意图，本轮必须至少产出一个推进意图。" + situational + renderPlannerTodos(opts.Todos.List())
 	}
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
