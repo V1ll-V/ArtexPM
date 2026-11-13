@@ -87,19 +87,19 @@ func ctfCategoryPrompt(challenge string, files []artifacts.Artifact) string {
 	case "pwn":
 		return `
 【Pwn（二进制漏洞利用）专精求解指引】
-核心思路：严格检查保护机制，定位内存破坏原语，编写本地与远程通用的 exploit 脚本。
-1. 保护机制检查：
-   - 必须先运行 "checksec <binary>" 确认保护机制：Canary、NX、PIE、RELRO。
-2. 远程靶机探测与 PoW 排查：
-   - 向远程靶机发送 exploit 前，先使用 ctf_probe_target 探测连通性并检查是否包含工作量证明（PoW）校验。
-3. 常见漏洞利用路径：
-   - 栈溢出：定位返回地址偏移（cyclic / cyclic -l）；无保护时构造 ret2text / ret2shellcode；开启 NX 构造 ROP 链（ROPgadget / pwntools ROP）。
-   - 信息泄露：利用 puts/printf 泄露 libc 基址，通过已知 libc 或 LibcSearcher 定位 system 和 "/bin/sh" 构造 ret2libc。
-   - 格式化字符串：%p 泄露栈/Canary/libc；%n 实现任意地址写。
-   - 堆漏洞：UAF、Off-by-one、Fastbin dup、Tcache poisoning；结合 IO_FILE 攻击。
-4. 利用脚本规范：
-   - 必须使用 "from pwn import *" 编写独立 exploit 脚本保存在 /work；支持通过参数在本地 process() 与远程 remote() 之间无缝切换。
-   - 多轮交互输入可结合 ctf_session_* 维护持久 PTY 会话。`
+核心思路：动静结合、环境统一、先本地通再打远程。
+1. 工作区与环境复用（防重复劳动）：
+   - 开始前先查看全局态势中是否已有前序 Worker 写回的附件路径、checksec、ld/libc 就绪目录或远程菜单 fact；若已存在工作目录（如 /work/chall），直接复用，严禁另建目录重新解包或重复下载 libc！
+2. 保护机制与二进制底座：
+   - 先使用 file、checksec <binary> 确认架构与保护机制（Canary、NX、PIE、RELRO）及配套 libc 版本。
+3. 远程靶机轻量握手：
+   - 先使用 ctf_probe_target 探测连通性、banner、菜单协议及工作量证明（PoW），仅做侦察（recon）时拿到协议与 PoW 事实即收工。
+4. 动静合一漏洞分析与利用（同上下文完成）：
+   - 将反编译/反汇编偏移定位（objdump/radare2/Ghidra）与动态调试（gdb/pwntools process() 验证堆/栈偏移与断言条件）结合推进，避免猜测偏移：
+     * 栈溢出 / 格式化字符串：%p 泄露地址，cyclic 定偏移，ret2text/ret2libc/%n 任意写；
+     * 堆漏洞：UAF、Off-by-one、Fastbin dup、Tcache poisoning、House of Orange / IO_FILE，务必用 gdb 或本地 LD_PRELOAD/patchelf 环境直接验证堆块布局。
+5. 利用脚本规范：
+   - 使用 "from pwn import *" 在统一工作目录编写同时支持本地/远程（如 -l / 命令行切换）的独立 exploit 脚本；本地稳定弹出 shell / 读出模拟 flag 后再切远程靶机一次拿下。`
 
 	case "web":
 		return `

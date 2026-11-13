@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
 	"strings"
 	"testing"
@@ -77,5 +78,31 @@ func TestCTFBaseForPlannerStripsExecutionTools(t *testing.T) {
 	ctxOut, nilOut := ctfBaseForPlanner(t.Context(), nil, base)
 	if ctxOut == nil || len(nilOut) != len(base) {
 		t.Fatalf("expected nil store fallback to preserve base tools, got %d", len(nilOut))
+	}
+}
+
+func TestCTFIntentPhaseAndPlannerStrategy(t *testing.T) {
+	if got := intentPhase(&db.Node{Payload: json.RawMessage(`{"summary":"probe","phase":" Recon "}`)}); got != "recon" {
+		t.Fatalf("expected recon phase, got %q", got)
+	}
+	if got := intentPhase(&db.Node{Payload: json.RawMessage(`{"summary":"plain"}`)}); got != "" {
+		t.Fatalf("expected empty phase, got %q", got)
+	}
+	if got := ctfMaxTurnsForPhase(true, "recon", 0); got != 16 {
+		t.Fatalf("expected recon maxTurns capped at 16, got %d", got)
+	}
+	if got := ctfMaxTurnsForPhase(true, "recon", 10); got != 10 {
+		t.Fatalf("expected lower configured maxTurns preserved, got %d", got)
+	}
+	if got := ctfMaxTurnsForPhase(true, "exploit", 0); got != 0 {
+		t.Fatalf("expected exploit maxTurns preserved, got %d", got)
+	}
+	pwnHint := ctfPlannerStrategyHint("pwn")
+	if !strings.Contains(pwnHint, "动静合一") || !strings.Contains(pwnHint, "recon") {
+		t.Fatalf("expected pwn planner hint to mention unified static/dynamic and recon phase, got %q", pwnHint)
+	}
+	webHint := ctfPlannerStrategyHint("web")
+	if !strings.Contains(webHint, "并行") {
+		t.Fatalf("expected web planner hint to mention parallel exploration, got %q", webHint)
 	}
 }
