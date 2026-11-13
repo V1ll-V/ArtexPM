@@ -72,7 +72,7 @@ func ctfBaseForPlanner(ctx context.Context, ts *db.ExplorationStore, base []acto
 	return context.WithValue(ctx, ctfRunKey{}, true), stripCTFPlannerBase(base)
 }
 
-var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binary_info", "ctf_gdb", "ctf_python", "ctf_decompile", "ctf_radare2", "Read", "LS", "ctf_tools", "ctf_run_background", "ctf_job_status", "ctf_job_stop", "ctf_probe_target", "ctf_session_start", "ctf_session_send", "ctf_session_read", "ctf_session_close", "ctf_pcap_analyze"}
+var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binary_info", "ctf_pwn_triage", "ctf_gdb", "ctf_python", "ctf_decompile", "ctf_radare2", "Read", "LS", "ctf_tools", "ctf_run_background", "ctf_job_status", "ctf_job_stop", "ctf_probe_target", "ctf_session_start", "ctf_session_send", "ctf_session_read", "ctf_session_close", "ctf_pcap_analyze"}
 
 func ctfCatalogTools() []actool.CoreTool {
 	out := []actool.CoreTool{}
@@ -148,6 +148,38 @@ func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
 			p, err := file(a)
 			return "file -- " + quote(p) + "; readelf -h -l -d -s -- " + quote(p) + "; /opt/ctf/pwn/bin/pwn checksec " + quote(p), 60, err
 		}),
+		commandTool("ctf_pwn_triage", "【Pwn 首选起手工具】一步完成 ELF/libc 综合测绘：采集 file/架构/stripped/checksec 保护、关键导入函数、Protobuf/Seccomp/堆特征、libc GNU 版本与 BuildID，并匹配本地离线 /opt/ctf/glibc 缓存；默认复制可写二进制到 work_dir 并在命中缓存时自动 patchelf 生成 *_patched。", obj(map[string]any{
+			"path":     str("二进制路径（如 /work/.inputs/.../original 或 /work/chall/pwn）"),
+			"libc":     str("可选，配套 libc.so.6 路径；留空时自动在同目录与工作区搜索"),
+			"work_dir": str("可选，工作目录，默认 /work"),
+			"patch":    map[string]any{"type": "boolean", "description": "若命中本地 /opt/ctf/glibc 缓存，是否自动 patchelf 生成 *_patched（默认 true）"},
+		}, "path"), func(a map[string]json.RawMessage) (string, int, error) {
+			p, err := file(a)
+			if err != nil {
+				return "", 0, err
+			}
+			workDir := strings.TrimSpace(text(a, "work_dir"))
+			if workDir == "" {
+				workDir = "/work"
+			}
+			args := quote(p) + " --work-dir=" + quote(workDir)
+			if libc := strings.TrimSpace(text(a, "libc")); libc != "" {
+				args += " --libc=" + quote(libc)
+			}
+			patch := true
+			if rawPatch, ok := a["patch"]; ok {
+				var b bool
+				if json.Unmarshal(rawPatch, &b) == nil {
+					patch = b
+				}
+			}
+			if patch {
+				args += " --patch"
+			}
+			cmd := fmt.Sprintf("if [ -f /opt/ctf/scripts/pwn_triage.py ]; then python3 /opt/ctf/scripts/pwn_triage.py %s; else python3 -c %s %s; fi",
+				args, quote(ctf.PwnTriageScript), args)
+			return cmd, 90, nil
+		}),
 		commandTool("ctf_gdb", "以 GDB batch 运行实际调试脚本，可设断点、运行、查看寄存器/栈/反汇编。保留 .gdb 脚本及输出。", obj(map[string]any{"path": str("样本路径，原始附件先复制到 /work 并 chmod +x"), "commands": str("多行 GDB 命令"), "timeout_seconds": intp("最多 300 秒")}, "path", "commands"), func(a map[string]json.RawMessage) (string, int, error) {
 			p, err := file(a)
 			script := "set pagination off\nset confirm off\n" + text(a, "commands") + "\n"
@@ -167,7 +199,7 @@ func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
 			}
 			return "printf %s " + quote(base64.StdEncoding.EncodeToString([]byte(text(a, "script")))) + " | base64 -d > " + quote(name) + "\n" + python + " " + quote(name), num(a, "timeout_seconds", 120), nil
 		}),
-		commandTool("ctf_decompile", "使用 Ghidra headless 实际分析并反编译指定函数，自动启用持久分析缓存以加速后续调用。函数名为空时取前 5 个函数。", obj(map[string]any{"path": str("二进制路径"), "function": str("函数名，可为空"), "limit": intp("最多 20 个函数")}, "path"), func(a map[string]json.RawMessage) (string, int, error) {
+		commandTool("ctf_decompile", "使用 Ghidra headless 实际分析并反编译指定函数，自动启用持久分析缓存（首次全量导入约 15s，后续单函数约 5s）。stripped/复杂逻辑二进制务必优先调用它，而非在 Bash 用 objdump 盲看汇编。函数名为空时取前 5 个函数。", obj(map[string]any{"path": str("二进制路径"), "function": str("函数名，可为空"), "limit": intp("最多 20 个函数")}, "path"), func(a map[string]json.RawMessage) (string, int, error) {
 			p, err := file(a)
 			limit := min(num(a, "limit", 5), 20)
 			fn := text(a, "function")

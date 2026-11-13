@@ -87,19 +87,21 @@ func ctfCategoryPrompt(challenge string, files []artifacts.Artifact) string {
 	case "pwn":
 		return `
 【Pwn（二进制漏洞利用）专精求解指引】
-核心思路：动静结合、环境统一、先本地通再打远程。
-1. 工作区与环境复用（防重复劳动）：
-   - 开始前先查看全局态势中是否已有前序 Worker 写回的附件路径、checksec、ld/libc 就绪目录或远程菜单 fact；若已存在工作目录（如 /work/chall），直接复用，严禁另建目录重新解包或重复下载 libc！
-2. 保护机制与二进制底座：
-   - 先使用 file、checksec <binary> 确认架构与保护机制（Canary、NX、PIE、RELRO）及配套 libc 版本。
+核心思路：动静结合、环境统一、反编译先行、先本地通再打远程。
+1. 共享工作区与环境复用（防重复劳动）：
+   - Pwn 任务所有阶段（recon / exploit / 对话交互）自动共享同一 /work 工作区与容器缓存；开始前先查看前序 Worker 写回的 fact 路径，若附件已解压、libc/ld 已就绪，**必须直接复用已有目录与 *_patched 文件**，严禁重复解压或重复下载 libc！
+2. 一步起手测绘（ctf_pwn_triage）：
+   - 解包后**优先调用一次 ctf_pwn_triage** 获取 file、checksec、Protobuf/Seccomp/堆特征及 libc GNU 版本/BuildID，优先匹配本地离线 /opt/ctf/glibc 缓存并自动 patchelf，避免 5~10 轮零散探测命令。
 3. 远程靶机轻量握手：
    - 先使用 ctf_probe_target 探测连通性、banner、菜单协议及工作量证明（PoW），仅做侦察（recon）时拿到协议与 PoW 事实即收工。
-4. 动静合一漏洞分析与利用（同上下文完成）：
-   - 将反编译/反汇编偏移定位（objdump/radare2/Ghidra）与动态调试（gdb/pwntools process() 验证堆/栈偏移与断言条件）结合推进，避免猜测偏移：
+4. 反编译优先 + 动静合一分析（严禁 Bash 盲读海量 objdump）：
+   - 遇到 stripped ELF 或复杂逻辑（Protobuf 结构体、堆菜单、VM），**第一步必须调用 ctf_decompile**（Ghidra 无头反编译；首次全量导入建缓存约 15s，后续单函数 query 仅 ~5s）。
+   - 将反编译还原的漏洞原语与动态调试（ctf_gdb / pwntools process() 核验堆布局、栈偏移与断言）结合，禁止靠猜偏移：
      * 栈溢出 / 格式化字符串：%p 泄露地址，cyclic 定偏移，ret2text/ret2libc/%n 任意写；
-     * 堆漏洞：UAF、Off-by-one、Fastbin dup、Tcache poisoning、House of Orange / IO_FILE，务必用 gdb 或本地 LD_PRELOAD/patchelf 环境直接验证堆块布局。
-5. 利用脚本规范：
-   - 使用 "from pwn import *" 在统一工作目录编写同时支持本地/远程（如 -l / 命令行切换）的独立 exploit 脚本；本地稳定弹出 shell / 读出模拟 flag 后再切远程靶机一次拿下。`
+     * 堆漏洞：UAF、Off-by-one、Fastbin dup、Tcache poisoning、House of Orange / IO_FILE，务必在本地 patched 环境验证后再打远程；含 seccomp 时用 seccomp-tools dump 检查限制。
+5. 利用脚本与本地测试纪律：
+   - 使用 "from pwn import *" 在同一脚本支持本地/远程模式切换；打印泄露地址一律使用 hex(addr) 格式化输出，严禁把原始二进制字节（含 \x00）直接 print 到 stdout。
+   - **本地自测严禁使用花括号 Flag 格式**：若测试读取 /tmp/flag，内容请写 "__LOCAL_PWN_OK__"，**严禁**写入 "flag{...}" / "FLAG{...}" / "ctf{...}"，避免误触发系统交接中断！本地打通后切换远程靶机一次获取真实 flag。`
 
 	case "web":
 		return `

@@ -47,8 +47,28 @@ func (s *Service) Sync(ctx context.Context, id int64) error {
 func (s *Service) WorkDir(task, intent int64) string {
 	return filepath.Join(s.Root, "tasks", strconv.FormatInt(task, 10), fmt.Sprintf("i%d", intent), "ctf-work")
 }
+func (s *Service) SharedWorkDir(task int64) string {
+	return filepath.Join(s.Root, "tasks", strconv.FormatInt(task, 10), "shared", "ctf-work")
+}
+func (s *Service) EffectiveSessionIntent(ctx context.Context, task, intent int64) int64 {
+	sessionIntent, _, _, _ := s.resolveScope(ctx, task, intent)
+	return sessionIntent
+}
+func (s *Service) EffectiveWorkDir(ctx context.Context, task, intent int64) string {
+	_, workDir, _, _ := s.resolveScope(ctx, task, intent)
+	return workDir
+}
 func (s *Service) LogicalPath(a artifacts.Artifact) string {
 	return "/work/.inputs/" + a.ID + "/original"
+}
+
+func (s *Service) resolveScope(ctx context.Context, task, intent int64) (sessionIntent int64, workDir, lockKey string, shared bool) {
+	if s != nil && s.DB != nil && task > 0 {
+		if mode, challenge, err := s.DB.TaskChallengeType(ctx, task); err == nil && mode == "ctf" && (challenge == "pwn" || challenge == "reverse") {
+			return 0, s.SharedWorkDir(task), fmt.Sprintf("%s/%d/shared", s.Root, task), true
+		}
+	}
+	return intent, s.WorkDir(task, intent), fmt.Sprintf("%s/%d/%d", s.Root, task, intent), false
 }
 
 var executionLocks sync.Map
@@ -60,35 +80,39 @@ func executionLock(key string) func() {
 	return m.Unlock
 }
 
-func (s *Service) prepareSession(ctx context.Context, task, intent int64) (string, ctfrunner.Session, artifacts.Manifest, error) {
+func (s *Service) prepareSession(ctx context.Context, task, intent int64) (string, ctfrunner.Session, artifacts.Manifest, string, error) {
+	sessionIntent, work, _, shared := s.resolveScope(ctx, task, intent)
 	store := artifacts.Store{Root: s.Root}
-	m, err := store.Inputs(task, intent)
+	m, err := store.Inputs(task, sessionIntent)
 	if err != nil {
-		return "", ctfrunner.Session{}, m, err
+		return "", ctfrunner.Session{}, m, "", err
 	}
-	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: intent, InputHash: Hash(m)}
+	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: sessionIntent, InputHash: Hash(m)}
 	session, err := s.Runner.Prepare(ctx, spec)
 	if err != nil {
-		return "", session, m, err
+		return "", session, m, "", err
 	}
 	key := spec.Key()
 	if !session.InputsReady {
 		if err = s.uploadInputs(ctx, key, task, m); err != nil {
-			return "", session, m, err
+			return "", session, m, "", err
 		}
 	}
-	work := s.WorkDir(task, intent)
+	if !shared {
+		seedNonSharedWorkDir(s.Root, task, work)
+	}
 	if err = os.MkdirAll(work, 0700); err != nil {
-		return "", session, m, err
+		return "", session, m, "", err
 	}
 	if err = s.uploadWork(ctx, key, work); err != nil {
-		return "", session, m, err
+		return "", session, m, "", err
 	}
-	return key, session, m, nil
+	return key, session, m, work, nil
 }
 
 func (s *Service) Execute(ctx context.Context, task, intent int64, command string, timeout int) (*db.CTFExecution, error) {
-	unlock := executionLock(fmt.Sprintf("%s/%d/%d", s.Root, task, intent))
+	sessionIntent, _, lockKey, _ := s.resolveScope(ctx, task, intent)
+	unlock := executionLock(lockKey)
 	defer unlock()
 	if err := s.Sync(ctx, task); err != nil {
 		return nil, err
@@ -98,7 +122,7 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 	} else if pending != nil {
 		return nil, fmt.Errorf("已有候选 Flag 等待用户提交验证（候选 #%d）；自动探测已停止，请先在答案与验证中确认或否定", pending.ID)
 	}
-	key, session, m, err := s.prepareSession(ctx, task, intent)
+	key, session, m, work, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -111,9 +135,11 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 		}
 		command = strings.ReplaceAll(command, p, s.LogicalPath(a))
 	}
-	work := s.WorkDir(task, intent)
 	command = strings.ReplaceAll(command, work, "/work")
-	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: intent, InputHash: Hash(m)}
+	if legacy := s.WorkDir(task, intent); legacy != work {
+		command = strings.ReplaceAll(command, legacy, "/work")
+	}
+	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: sessionIntent, InputHash: Hash(m)}
 	e := &db.CTFExecution{ID: uuid.NewString(), TaskID: task, IntentID: intent, InputHash: spec.InputHash, Command: command, ExitCode: -1, StartedAt: time.Now().UTC()}
 	e.Environment, _ = json.Marshal(map[string]any{"image": session.Image, "image_id": session.ImageID})
 	result, runErr := s.Runner.Execute(ctx, key, command, timeout)
@@ -170,6 +196,9 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 		return nil, err
 	}
 	for _, flag := range ExtractFlags(string(result.Stdout)+"\n"+string(result.Stderr), 32) {
+		if IsSelfConstructedMockFlag(command, flag) {
+			continue
+		}
 		if _, err = s.DB.AddCTFOutputCandidate(saveCtx, task, e.ID, flag); err != nil {
 			return nil, err
 		}
@@ -178,7 +207,8 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 }
 
 func (s *Service) StartJob(ctx context.Context, task, intent int64, command, jobID string) (*ctfrunner.JobInfo, error) {
-	unlock := executionLock(fmt.Sprintf("%s/%d/%d", s.Root, task, intent))
+	sessionIntent, _, lockKey, _ := s.resolveScope(ctx, task, intent)
+	unlock := executionLock(lockKey)
 	defer unlock()
 	if err := s.Sync(ctx, task); err != nil {
 		return nil, err
@@ -188,7 +218,7 @@ func (s *Service) StartJob(ctx context.Context, task, intent int64, command, job
 	} else if pending != nil {
 		return nil, fmt.Errorf("已有候选 Flag 等待用户提交验证（候选 #%d）；自动探测已停止，请先在答案与验证中确认或否定", pending.ID)
 	}
-	key, session, m, err := s.prepareSession(ctx, task, intent)
+	key, session, m, work, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -198,11 +228,13 @@ func (s *Service) StartJob(ctx context.Context, task, intent int64, command, job
 			command = strings.ReplaceAll(command, p, s.LogicalPath(a))
 		}
 	}
-	work := s.WorkDir(task, intent)
 	command = strings.ReplaceAll(command, work, "/work")
+	if legacy := s.WorkDir(task, intent); legacy != work {
+		command = strings.ReplaceAll(command, legacy, "/work")
+	}
 
 	execID := uuid.NewString()
-	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: intent, InputHash: Hash(m)}
+	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: sessionIntent, InputHash: Hash(m)}
 	e := &db.CTFExecution{
 		ID:        execID,
 		TaskID:    task,
@@ -226,7 +258,7 @@ func (s *Service) StartJob(ctx context.Context, task, intent int64, command, job
 }
 
 func (s *Service) ListJobs(ctx context.Context, task, intent int64) ([]ctfrunner.JobInfo, error) {
-	key, _, _, err := s.prepareSession(ctx, task, intent)
+	key, _, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +266,7 @@ func (s *Service) ListJobs(ctx context.Context, task, intent int64) ([]ctfrunner
 }
 
 func (s *Service) JobStatus(ctx context.Context, task, intent int64, jobID string, tailLines int) (*ctfrunner.JobStatus, error) {
-	key, _, _, err := s.prepareSession(ctx, task, intent)
+	key, _, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +286,7 @@ func (s *Service) JobStatus(ctx context.Context, task, intent int64, jobID strin
 }
 
 func (s *Service) StopJob(ctx context.Context, task, intent int64, jobID string) error {
-	key, _, _, err := s.prepareSession(ctx, task, intent)
+	key, _, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return err
 	}
@@ -262,7 +294,7 @@ func (s *Service) StopJob(ctx context.Context, task, intent int64, jobID string)
 }
 
 func (s *Service) StartInteractive(ctx context.Context, task, intent int64, command, sid string) (*ctfrunner.InteractiveSessionInfo, error) {
-	key, session, _, err := s.prepareSession(ctx, task, intent)
+	key, session, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +322,7 @@ func (s *Service) StartInteractive(ctx context.Context, task, intent int64, comm
 }
 
 func (s *Service) ListInteractive(ctx context.Context, task, intent int64) ([]ctfrunner.InteractiveSessionInfo, error) {
-	key, _, _, err := s.prepareSession(ctx, task, intent)
+	key, _, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +330,7 @@ func (s *Service) ListInteractive(ctx context.Context, task, intent int64) ([]ct
 }
 
 func (s *Service) WriteInteractive(ctx context.Context, task, intent int64, sid, data, encoding string, autoNewline bool) (*ctfrunner.InteractiveWriteResult, error) {
-	key, _, _, err := s.prepareSession(ctx, task, intent)
+	key, _, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +338,7 @@ func (s *Service) WriteInteractive(ctx context.Context, task, intent int64, sid,
 }
 
 func (s *Service) ReadInteractive(ctx context.Context, task, intent int64, sid string, offset int64, waitMs int) (*ctfrunner.InteractiveReadResult, error) {
-	key, _, _, err := s.prepareSession(ctx, task, intent)
+	key, _, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +359,7 @@ func (s *Service) ReadInteractive(ctx context.Context, task, intent int64, sid s
 }
 
 func (s *Service) CloseInteractive(ctx context.Context, task, intent int64, sid string) error {
-	key, _, _, err := s.prepareSession(ctx, task, intent)
+	key, _, _, _, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
 		return err
 	}
@@ -335,10 +367,96 @@ func (s *Service) CloseInteractive(ctx context.Context, task, intent int64, sid 
 }
 
 func excerpt(b []byte, n int) string {
-	if len(b) <= n {
-		return strings.ToValidUTF8(string(b), "�")
+	suffix := ""
+	if len(b) > n {
+		b = b[:n]
+		suffix = "\n[输出节选；完整日志可下载]"
 	}
-	return strings.ToValidUTF8(string(b[:n]), "�") + "\n[输出节选；完整日志可下载]"
+	return strings.ToValidUTF8(strings.ReplaceAll(string(b), "\x00", ""), "�") + suffix
+}
+
+// seedNonSharedWorkDir 在非共享模式下（如 Web/Misc/Crypto），当新意图的 ctf-work 尚未创建时，
+// 从同任务最早已有内容的 i*/ctf-work 复制解包产物，避免每个并行方向重新解压附件。
+func seedNonSharedWorkDir(root string, task int64, targetWork string) {
+	if _, err := os.Stat(targetWork); err == nil {
+		return
+	}
+	taskDir := filepath.Join(root, "tasks", strconv.FormatInt(task, 10))
+	entries, err := os.ReadDir(taskDir)
+	if err != nil {
+		return
+	}
+	var srcDir string
+	for _, ent := range entries {
+		if !ent.IsDir() || !strings.HasPrefix(ent.Name(), "i") {
+			continue
+		}
+		cand := filepath.Join(taskDir, ent.Name(), "ctf-work")
+		if cand == targetWork {
+			continue
+		}
+		if sub, err := os.ReadDir(cand); err == nil && len(sub) > 0 {
+			srcDir = cand
+			break
+		}
+	}
+	if srcDir == "" {
+		return
+	}
+	const maxSeedBytes int64 = 64 << 20
+	const maxSeedFiles = 256
+	var copiedBytes int64
+	copiedFiles := 0
+	_ = filepath.WalkDir(srcDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == srcDir {
+			return err
+		}
+		rel, e := filepath.Rel(srcDir, p)
+		if e != nil {
+			return nil
+		}
+		slash := filepath.ToSlash(rel)
+		base := strings.ToLower(d.Name())
+		if base == ".cache" || base == ".config" || base == ".tools" || base == "__pycache__" || strings.HasPrefix(slash, ".inputs") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		dst := filepath.Join(targetWork, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0700)
+		}
+		if strings.HasPrefix(base, "solve") || strings.HasPrefix(base, "exp") || base == "debug.gdb" || strings.HasSuffix(base, ".pyc") || strings.HasSuffix(base, ".tmp") {
+			return nil
+		}
+		info, e := d.Info()
+		if e != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		if info.Size() > 32<<20 || copiedBytes+info.Size() > maxSeedBytes || copiedFiles+1 > maxSeedFiles {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+			return nil
+		}
+		data, e := os.ReadFile(p)
+		if e != nil {
+			return nil
+		}
+		mode := os.FileMode(0600)
+		if info.Mode()&0111 != 0 {
+			mode = 0700
+		}
+		if err := os.WriteFile(dst, data, mode); err == nil {
+			copiedBytes += info.Size()
+			copiedFiles++
+		}
+		return nil
+	})
 }
 
 func streamTar(ctx context.Context, send func(io.Reader) error, build func(*tar.Writer) error) error {

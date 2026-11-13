@@ -85,9 +85,17 @@ func (d *DB) SaveCTFExecution(ctx context.Context, e *CTFExecution) error {
 	if e.Environment == nil {
 		e.Environment = json.RawMessage(`{}`)
 	}
+	cmd := utf8Clean(e.Command)
+	stdoutPath := utf8Clean(e.StdoutPath)
+	stderrPath := utf8Clean(e.StderrPath)
+	stdoutExcerpt := utf8Clean(e.StdoutExcerpt)
+	stderrExcerpt := utf8Clean(e.StderrExcerpt)
+	errMsg := utf8Clean(e.Error)
+	files := jsonbClean(e.Files)
+	env := jsonbClean(e.Environment)
 	_, err := d.ExecContext(ctx, `INSERT INTO ctf_executions(id,task_id,intent_id,input_hash,command,exit_code,stdout_path,stderr_path,stdout_sha,stderr_sha,stdout_excerpt,stderr_excerpt,error,truncated,files,started_at,finished_at,environment)
  SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17,$18::jsonb WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$2 AND mode='ctf' AND deleted_at IS NULL)
- ON CONFLICT(id) DO NOTHING`, e.ID, e.TaskID, e.IntentID, e.InputHash, e.Command, e.ExitCode, e.StdoutPath, e.StderrPath, e.StdoutSHA, e.StderrSHA, e.StdoutExcerpt, e.StderrExcerpt, e.Error, e.Truncated, string(e.Files), e.StartedAt, e.FinishedAt, string(e.Environment))
+ ON CONFLICT(id) DO NOTHING`, e.ID, e.TaskID, e.IntentID, e.InputHash, cmd, e.ExitCode, stdoutPath, stderrPath, e.StdoutSHA, e.StderrSHA, stdoutExcerpt, stderrExcerpt, errMsg, e.Truncated, string(files), e.StartedAt, e.FinishedAt, string(env))
 	return err
 }
 
@@ -129,6 +137,7 @@ func (d *DB) AddCTFOutputCandidate(ctx context.Context, taskID int64, execID, va
 }
 
 func (d *DB) addCTFCandidate(ctx context.Context, taskID int64, execID, value string, skipRejected bool) (int64, error) {
+	value = utf8Clean(value)
 	if strings.TrimSpace(value) == "" || len(value) > 4096 {
 		return 0, errors.New("候选答案长度无效")
 	}

@@ -2,6 +2,23 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.8.0] - 2026-11-13
+
+### 新增与优化
+
+- **Pwn / Reverse 分阶段侦察与“动静合一”主攻编排体系**：
+  - **跨意图共享工作区与工具容器复用（`ctf.Service.resolveScope`）**：`pwn` 与 `reverse` 题型同一任务下跨意图共享 `/work` 目录、`session` 容器与执行互斥锁，消除重复解包、重复反编译与重复 `patchelf`；`web`/`misc`/`crypto` 保持意图隔离的同时通过 `seedNonSharedWorkDir` 自动继承首个工作区的解包产物。
+  - **双层主攻互斥与暂停保护**：Planner 派发检查（`agent/tools.go`）与数据库 `ClaimIntentGuarded` 协同限制 `pwn`/`reverse` 同时仅允许 1 条 `phase="exploit"` 主攻意图推进（仍允许并发轻量 `recon`），防止多 Worker 并行抢跑与劫持人工暂停/对话指导中的主攻意图；探索图概览新增 `paused_intents` 感知。
+  - **新增 `ctf_pwn_triage`（`ctf-pwn-triage`）综合起手测绘工具与离线 glibc 缓存池**：一步采集 `file`、架构、`stripped`、`checksec`、导入符号、Protobuf/Seccomp/堆特征及 `libc` GNU 版本/BuildID，匹配工具镜像预置 `/opt/ctf/glibc` 离线库并自动 `patchelf` 生成 `*_patched`；工具镜像新增 `protobuf-compiler`、`libprotobuf-c-dev` 与离线 glibc 构建脚本，`doctor.py` 扩展至 41 项自检。
+  - **反编译优先与严格角色隔离**：增强 Planner/Worker 分阶段提示词，引导 stripped/复杂二进制优先调用 `ctf_pwn_triage` 与 `ctf_decompile`（Ghidra 缓存反编译），强化中文内部思考规范与真实执行证据引用。
+- **多 Flag 持续求解与一键智能 WP 排版优化**：
+  - 支持一题多 Flag 增量突破：跟踪 `goals_total`/`goals_met`/`goals_open`，支持部分确认后继续探索剩余目标并聚合输出总览表格与全量 PoC。
+  - 新增一键 WP 智能优化（`/api/tasks/{id}/ctf/wp/optimize`）：按因果路径精简调试噪音、提炼解题总览与干净 PoC；WP 生成器升级至 `v0.8.0-clean-wp`。
+- **执行与 Flag 稳健性修复**：
+  - **NUL 字节清洗**：`utf8Clean`、`jsonbClean` 与 `excerpt` 自动剥离命令/输出/环境中的 `\x00`，修复裸二进制泄露导致 PostgreSQL UTF-8/JSONB 入库失败问题。
+  - **假 Flag 防误触发与否定反馈延续**：`ExtractFlags` 拒绝紧邻标识符截断子串，新增 `IsSelfConstructedMockFlag` 避免测试占位符误触发提交等待；规范本地测试统一使用 `__LOCAL_PWN_OK__` 哨兵；候选被否定后自动向续跑 Worker 注入否定值与备注避免重复提交。
+  - **DNS 探测容错**：`probe_target.py` 与 `ctf/probe.go` 增加多轮 DNS `getaddrinfo` 重试与 `getent ahostsv4` 兜底，缓解容器 DNS 瞬时抖动。
+
 ## [0.7.0] - 2026-11-12
 
 ### 新增与优化

@@ -36,6 +36,10 @@ func buildFlagPattern(extra string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)(?:` + strings.Join(alts, "|") + `)\{[^\r\n{}]{1,256}\}`)
 }
 
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
 // flagRegexp 读取 ARTEX_CTF_FLAG_PREFIXES（逗号分隔）一次并缓存。
 func flagRegexp() *regexp.Regexp {
 	flagOnce.Do(func() { flagMatcher = buildFlagPattern(os.Getenv("ARTEX_CTF_FLAG_PREFIXES")) })
@@ -67,9 +71,19 @@ func ExtractFlags(text string, limit int) []string {
 			out = append(out, v)
 		}
 	}
-	for _, f := range re.FindAllString(text, limit) {
-		add(f)
+	extractMatches := func(s string) {
+		for _, loc := range re.FindAllStringIndex(s, -1) {
+			if len(out) >= limit {
+				break
+			}
+			// 拒绝紧邻标识符字符的截断子串（例如 LOCAL_TEST_FLAG{...} 不得切片出 FLAG{...}）。
+			if loc[0] > 0 && isIdentChar(s[loc[0]-1]) {
+				continue
+			}
+			add(s[loc[0]:loc[1]])
+		}
 	}
+	extractMatches(text)
 	for _, tok := range base64Token.FindAllString(text, 64) {
 		var raw []byte
 		var err error
@@ -79,9 +93,7 @@ func ExtractFlags(text string, limit int) []string {
 		if err != nil || !printable(raw) {
 			continue
 		}
-		for _, f := range re.FindAllString(string(raw), limit) {
-			add(f)
-		}
+		extractMatches(string(raw))
 	}
 	for _, tok := range hexToken.FindAllString(text, 64) {
 		if len(tok)%2 != 0 {
@@ -91,9 +103,18 @@ func ExtractFlags(text string, limit int) []string {
 		if err != nil || !printable(raw) {
 			continue
 		}
-		for _, f := range re.FindAllString(string(raw), limit) {
-			add(f)
-		}
+		extractMatches(string(raw))
 	}
 	return out
+}
+
+// IsSelfConstructedMockFlag reports whether flag appears verbatim inside command
+// (e.g. a local dummy /tmp/flag test literal) and therefore should not trigger
+// automatic candidate submission.
+func IsSelfConstructedMockFlag(command, value string) bool {
+	v := strings.TrimSpace(value)
+	if v == "" || command == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(command), strings.ToLower(v))
 }

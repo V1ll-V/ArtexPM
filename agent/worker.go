@@ -561,6 +561,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		if len(s.Messages()) > 0 && message == "" {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 			input = "继续执行。"
+			if ctfMode && ts != nil {
+				if cands, cerr := ts.Database().CTFCandidates(ctx, taskID); cerr == nil && len(cands) > 0 && cands[0].State == "rejected" {
+					input = fmt.Sprintf("上一轮候选 Flag `%s` 已被用户否定（备注：%s），请勿重复提交该值，请据此调整策略并继续执行。", cands[0].Value, cands[0].Notes)
+				}
+			}
 		} else if len(s.Messages()) > 0 {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 		}

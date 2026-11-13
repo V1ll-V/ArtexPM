@@ -45,8 +45,8 @@ func TestServiceInteractiveSessionAndAutoCandidate(t *testing.T) {
 	_, _ = store.Add("task", fmt.Sprint(task.ID), "chal.bin", "sample", strings.NewReader("sample"))
 
 	s := &Service{Root: root, DB: pg, Runner: runner}
-	m, _ := store.Inputs(task.ID, 301)
-	spec := ctfrunner.SessionSpec{TaskID: task.ID, IntentID: 301, InputHash: Hash(m)}
+	m, _ := store.Inputs(task.ID, s.EffectiveSessionIntent(t.Context(), task.ID, 301))
+	spec := ctfrunner.SessionSpec{TaskID: task.ID, IntentID: s.EffectiveSessionIntent(t.Context(), task.ID, 301), InputHash: Hash(m)}
 	defer engine.Remove(context.Background(), "artex-ctf-"+spec.Key())
 
 	// 模拟交互式 Python 靶机

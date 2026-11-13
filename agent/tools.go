@@ -415,11 +415,13 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
 	all, _ := t.ts.ListByKind(db.KindIntent, 300)
-	var running, recentDone []*db.Node
+	var running, paused, recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
 		case "running":
 			running = append(running, n)
+		case "paused":
+			paused = append(paused, n)
 		case "done", "blocked", "exhausted":
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
@@ -428,6 +430,8 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		}
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
+	out["paused_intents"] = compactIntents(paused, parentsOf, yieldsOf)
+	out["paused_intents_total"] = len(paused)
 	// done_intents_total：已结束意图（done/blocked/exhausted）总数，与 recent_done_intents
 	// 平行命名——后者只是它的最新窗口截断视图。两键并排即自描述："看到的是 N/总数"，
 	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
@@ -1145,8 +1149,25 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		}
 	}
 	payload := map[string]any{"summary": it.Summary}
-	if phase := strings.ToLower(strings.TrimSpace(it.Phase)); phase != "" {
+	phase := strings.ToLower(strings.TrimSpace(it.Phase))
+	if phase != "" {
 		payload["phase"] = phase
+	}
+	if t.ts != nil && phase == "exploit" {
+		if mode, challenge, _, err := t.ts.TaskInputMetadata(); err == nil && mode == "ctf" {
+			ch := strings.ToLower(strings.TrimSpace(challenge))
+			if ch == "pwn" || ch == "reverse" {
+				existing, _ := t.ts.ListByKind(db.KindIntent, 100)
+				for _, en := range existing {
+					if en.State != "open" && en.State != "running" && en.State != "paused" {
+						continue
+					}
+					if strings.EqualFold(intentPhase(en), "exploit") {
+						return 0, fmt.Errorf("当前 %s 任务已存在处于 %s 状态的 phase=\"exploit\" 主攻意图 #%d，严禁在 Pwn/Reverse 中并跑多条 exploit 主线。请等待或查看该意图执行情况（暂停中可通知/继续，或在明确停止后再续派），切勿重复派发", ch, en.State, en.ID)
+					}
+				}
+			}
+		}
 	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors

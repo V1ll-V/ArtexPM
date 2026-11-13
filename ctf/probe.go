@@ -62,13 +62,34 @@ def probe_target(target_str, timeout=10.0):
         "suggested_command": None, "error": None
     }
     t0 = time.time()
-    try:
-        ip = socket.gethostbyname(host)
-        res["resolved_ip"] = ip
-        res["dns_time_ms"] = round((time.time() - t0) * 1000, 2)
-    except Exception as e:
-        res["error"] = f"DNS resolution failed: {e}"
+    ip = None
+    dns_err = None
+    attempts = 0
+    for attempt in range(3):
+        attempts = attempt + 1
+        try:
+            infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            if infos:
+                ip = infos[0][4][0]
+                break
+        except Exception as e:
+            dns_err = e
+            if attempt < 2:
+                time.sleep(0.3 * (attempt + 1))
+    if not ip:
+        try:
+            import subprocess
+            p = subprocess.run(["getent", "ahostsv4", host], capture_output=True, text=True, timeout=3)
+            if p.returncode == 0 and p.stdout.strip():
+                ip = p.stdout.strip().splitlines()[0].split()[0]
+        except Exception:
+            pass
+    res["dns_attempts"] = attempts
+    if not ip:
+        res["error"] = f"DNS resolution failed: {dns_err}"
         return res
+    res["resolved_ip"] = ip
+    res["dns_time_ms"] = round((time.time() - t0) * 1000, 2)
 
     t1 = time.time()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -1,0 +1,25 @@
+# Reuse existing local artex-ctf-tools base image; adds protobuf-c toolchain, offline glibc pool, and updated Pwn/Probe scripts.
+ARG CTF_TOOLS_BASE=autumn27/artex-ctf-tools:20261109
+FROM ${CTF_TOOLS_BASE}
+
+USER root
+
+RUN (sed -i 's/deb.debian.org/mirrors.aliyun.com/g; s/mirrors.ustc.edu.cn/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true) \
+    && apt-get -o Acquire::http::Timeout=300 -o Acquire::Retries=5 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::http::Timeout=300 -o Acquire::Retries=5 --no-install-recommends \
+    protobuf-compiler libprotobuf-c-dev && rm -rf /var/lib/apt/lists/*
+
+COPY docker/ctf-tools/doctor.py /opt/ctf/doctor.py
+COPY docker/ctf-tools/probe_target.py /opt/ctf/scripts/probe_target.py
+COPY docker/ctf-tools/pwn_triage.py /opt/ctf/scripts/pwn_triage.py
+COPY docker/ctf-tools/build_glibc_pool.py /tmp/build_glibc_pool.py
+
+RUN chmod +x /opt/ctf/scripts/probe_target.py /opt/ctf/scripts/pwn_triage.py \
+    && ln -sf /opt/ctf/scripts/probe_target.py /usr/local/bin/ctf-probe \
+    && ln -sf /opt/ctf/scripts/pwn_triage.py /usr/local/bin/ctf-pwn-triage \
+    && python3 /tmp/build_glibc_pool.py \
+    && rm -f /tmp/build_glibc_pool.py
+
+USER 1000:1000
+WORKDIR /work
+CMD ["sleep", "infinity"]

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -33,6 +34,12 @@ func NormalizeTaskMode(mode, challenge string) (string, string, error) {
 func (s *ExplorationStore) TaskInputMetadata() (mode, challenge, batch string, err error) {
 	err = s.db.QueryRow(`SELECT mode,challenge_type,attachment_batch_id FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL`, s.ID()).Scan(&mode, &challenge, &batch)
 	return
+}
+
+// TaskChallengeType returns the normalized task mode and CTF challenge type for taskID.
+func (d *DB) TaskChallengeType(ctx context.Context, taskID int64) (mode, challenge string, err error) {
+	err = d.QueryRowContext(ctx, `SELECT mode,COALESCE(challenge_type,'') FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&mode, &challenge)
+	return strings.ToLower(strings.TrimSpace(mode)), strings.ToLower(strings.TrimSpace(challenge)), err
 }
 
 func ValidAttachmentBatch(id string) bool {
