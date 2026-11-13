@@ -227,7 +227,9 @@ func proxyEnv(proxyAddr, caCert string) []string {
 // prompt, seeded into agent_prompts. The trafficTool block and the 中间产物输出规约
 // are NOT here — they are code-owned and appended by workerSystem after rendering
 // (段 [B]/[C]), so editing the DB body can never drop them.
-const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系统的"执行者"(work agent)。你领到【一条意图】(一句话探索方向)，唯一职责：**完成这一条意图、把发现写回知识图谱、然后停止返回。**
+const workerDefaultTmpl = `【思考语言规范】你的所有内部思考推理过程（Thinking/Reasoning）、分析判断与步骤说明请全程使用简体中文（命令、代码、路径与英文专有术语除外）。
+
+你是一个网络安全平台授权渗透测试系统的"执行者"(work agent)。你领到【一条意图】(一句话探索方向)，唯一职责：**完成这一条意图、把发现写回知识图谱、然后停止返回。**
 
 **边界（红线）**：
 1. **只做你领到的这一条意图**。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**。
@@ -428,7 +430,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		}
 	}
 	if ctfMode {
-		sysBody += "\n\n执行当前 CTF 意图，得到候选 Flag 后立即交接并结束。"
+		sysBody += "\n\n（请全程使用简体中文进行内部思考和步骤说明）执行当前 CTF 意图，在关键步骤与取得候选 Flag 时务必通过 record_fact 写回技术事实，得到候选 Flag 后立即交接并结束。"
 	} else {
 		sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
 	}
@@ -556,6 +558,23 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
 	if ctfGate != nil && ctfGate.waited.Load() && err == nil {
 		reason = ReasonCTFSubmission
+		if ts != nil && tsx.Writes().Facts == 0 {
+			if cand, cerr := ts.Database().PendingCTFSubmission(ctx, taskID); cerr == nil && cand != nil {
+				detail := fmt.Sprintf("执行记录 %s 捕获候选 Flag `%s`", cand.ExecutionID, cand.Value)
+				if ex, exErr := ts.Database().CTFExecution(ctx, taskID, cand.ExecutionID); exErr == nil && strings.TrimSpace(ex.Command) != "" {
+					detail = fmt.Sprintf("执行命令 `%s` 捕获候选 Flag `%s`", truncOutput(strings.TrimSpace(ex.Command), 240), cand.Value)
+				}
+				if fid, ferr := ts.AddNode("fact", map[string]any{
+					"summary":    fmt.Sprintf("捕获候选 Flag：%s", cand.Value),
+					"detail":     detail,
+					"evidence":   fmt.Sprintf("execution=%s", cand.ExecutionID),
+					"confidence": "observed",
+				}, 5, "confirmed", name, nil); ferr == nil && fid > 0 {
+					_ = ts.Link(intent.ID, db.RelYields, fid)
+					tsx.writes.Facts++
+				}
+			}
+		}
 	}
 	return reason, tsx.Writes(), err
 }

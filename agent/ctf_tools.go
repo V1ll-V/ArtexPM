@@ -42,6 +42,36 @@ func ctfBase(ctx context.Context, root string, ts *db.ExplorationStore, task, in
 	return context.WithValue(ctx, ctfRunKey{}, true), out
 }
 
+func stripCTFPlannerBase(base []actool.CoreTool) []actool.CoreTool {
+	out := make([]actool.CoreTool, 0, len(base))
+	for _, t := range base {
+		name := t.Name()
+		if strings.HasPrefix(name, "ctf_") {
+			continue
+		}
+		switch name {
+		case "Bash", "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "LS",
+			"report_finding", "update_finding_report", "add_task_scope", "add_company_scope", "list_untested_assets":
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// ctfBaseForPlanner scopes the CTF planner strictly to graph/intent/goal orchestration tools,
+// withholding shell and execution tools so every technical probe/exploit is dispatched to workers.
+func ctfBaseForPlanner(ctx context.Context, ts *db.ExplorationStore, base []actool.CoreTool) (context.Context, []actool.CoreTool) {
+	if ts == nil {
+		return ctx, base
+	}
+	mode, _, _, err := ts.TaskInputMetadata()
+	if err != nil || mode != "ctf" {
+		return ctx, base
+	}
+	return context.WithValue(ctx, ctfRunKey{}, true), stripCTFPlannerBase(base)
+}
+
 var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binary_info", "ctf_gdb", "ctf_python", "ctf_decompile", "ctf_radare2", "Read", "LS", "ctf_tools", "ctf_run_background", "ctf_job_status", "ctf_job_stop", "ctf_probe_target", "ctf_session_start", "ctf_session_send", "ctf_session_read", "ctf_session_close", "ctf_pcap_analyze"}
 
 func ctfCatalogTools() []actool.CoreTool {

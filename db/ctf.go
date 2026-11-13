@@ -215,9 +215,24 @@ func (d *DB) DecideCTFCandidate(ctx context.Context, taskID, id, expectedRevisio
 		}
 		if state == "accepted" {
 			payload, _ := json.Marshal(map[string]any{"summary": "人工确认本题候选答案：" + c.Value, "detail": notes, "subtype": "ctf_answer", "candidate_id": c.ID, "execution_id": c.ExecutionID, "input_hash": c.InputHash, "verification": "operator_confirmed"})
-			_, err = tx.ExecContext(ctx, `INSERT INTO exploration_nodes(exploration_id,kind,payload,state,origin) SELECT exploration_id,'fact',$2::jsonb,'confirmed','human' FROM tasks WHERE id=$1`, taskID, string(payload))
-			if err == nil {
-				_, _ = tx.ExecContext(ctx, `UPDATE exploration_nodes SET blocked_reason='' WHERE exploration_id=(SELECT exploration_id FROM tasks WHERE id=$1) AND kind='goal' AND state='open' AND blocked_reason='CTF 答案确认已撤销，请重新验证'`, taskID)
+			var expID, factID int64
+			err = tx.QueryRowContext(ctx, `INSERT INTO exploration_nodes(exploration_id,kind,payload,state,origin) SELECT exploration_id,'fact',$2::jsonb,'confirmed','human' FROM tasks WHERE id=$1 RETURNING exploration_id, id`, taskID, string(payload)).Scan(&expID, &factID)
+			if err == nil && expID > 0 && factID > 0 {
+				var intentID int64
+				if c.ExecutionID != "" {
+					_ = tx.QueryRowContext(ctx, `SELECT intent_id FROM ctf_executions WHERE task_id=$1 AND id=$2`, taskID, c.ExecutionID).Scan(&intentID)
+				}
+				srcID := intentID
+				if srcID <= 0 {
+					_ = tx.QueryRowContext(ctx, `SELECT id FROM exploration_nodes WHERE exploration_id=$1 AND kind='fact' AND state='origin' ORDER BY id LIMIT 1`, expID).Scan(&srcID)
+				}
+				if srcID > 0 {
+					_, _ = tx.ExecContext(ctx, `INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id) VALUES ($1,$2,$3,$4) ON CONFLICT (exploration_id,src_id,rel,dst_id) DO NOTHING`, expID, srcID, RelYields, factID)
+				}
+				if !finish && intentID > 0 {
+					_, _ = tx.ExecContext(ctx, `UPDATE exploration_nodes SET state='done',content_version=content_version+1 WHERE id=$1 AND exploration_id=$2 AND kind='intent' AND state='open'`, intentID, expID)
+				}
+				_, _ = tx.ExecContext(ctx, `UPDATE exploration_nodes SET blocked_reason='' WHERE exploration_id=$1 AND kind='goal' AND state='open' AND blocked_reason='CTF 答案确认已撤销，请重新验证'`, expID)
 			}
 		}
 		if state == "rejected" && c.State == "accepted" {

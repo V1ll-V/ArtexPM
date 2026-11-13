@@ -1,6 +1,7 @@
 package ctf
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 
 func TestWPNoiseFilterAndSummaries(t *testing.T) {
 	noise := []string{
-		"ls", "ls -la", "pwd", "whoami", "cd /work && ls",
+		"ls", "ls -la", "pwd", "whoami", "cd /work && ls", "which python3", "cat /etc/os-release",
 	}
 	for _, n := range noise {
 		if !isNoiseCommand(n) {
@@ -30,7 +31,7 @@ func TestWPNoiseFilterAndSummaries(t *testing.T) {
 			t.Errorf("expected %q to NOT be noise", u)
 		}
 		summary := summarizeCommand(u)
-		if summary == "" || summary == "执行关键分析操作" && strings.Contains(u, "unzip") {
+		if summary == "" || (summary == "执行关键分析与验证步骤" && strings.Contains(u, "unzip")) {
 			t.Errorf("unexpected summary %q for %q", summary, u)
 		}
 	}
@@ -56,14 +57,35 @@ func TestMultiFlagWPGeneration(t *testing.T) {
 		{ID: "exec-1", Command: "curl http://test/1", ExitCode: 0, StdoutExcerpt: "flag{scene_1}"},
 		{ID: "exec-2", Command: "curl http://test/2", ExitCode: 0, StdoutExcerpt: "flag{scene_2}"},
 	}
-	wp := svc.generateDeterministicOptimizedWP("渗透测试", "多场景题目", "获取全部flag", "web", artifacts.Manifest{}, execs, acc, acc[0], nil, "exec-2", nil, nil)
-	if !strings.Contains(wp, "累计确认 **2 个有效 Flag**") {
-		t.Errorf("expected multi-flag WP to mention 2 confirmed flags, got:\n%s", wp)
+	facts := []wpFact{
+		{ID: 1, State: "origin", Payload: json.RawMessage(`{"summary":"任务目标"}`)},
+		{ID: 2, State: "confirmed", Payload: json.RawMessage(`{"summary":"发现登录接口存在 SQL 注入漏洞"}`)},
+		{ID: 3, State: "confirmed", Payload: json.RawMessage(`{"subtype":"ctf_answer","summary":"人工确认本题候选答案"}`)},
 	}
-	if !strings.Contains(wp, "flag{scene_1}") || !strings.Contains(wp, "flag{scene_2}") {
-		t.Errorf("expected multi-flag WP to contain all confirmed flags, got:\n%s", wp)
+	wp := svc.generateDeterministicOptimizedWP("渗透测试", "多场景题目", "获取全部flag", "web", artifacts.Manifest{}, facts, execs, acc, acc[0], nil, "exec-2", nil, nil)
+	for _, want := range []string{
+		"## 一、题目信息",
+		"## 二、解题思路",
+		"## 三、关键步骤",
+		"## 四、核心 PoC / 利用脚本",
+		"## 五、获取 Flag",
+		"发现登录接口存在 SQL 注入漏洞",
+		"2 个有效 Flag",
+		"flag{scene_1}",
+		"flag{scene_2}",
+		"场景1 成功",
+		"场景2 修复",
+	} {
+		if !strings.Contains(wp, want) {
+			t.Errorf("expected WP to contain %q, got:\n%s", want, wp)
+		}
 	}
-	if !strings.Contains(wp, "场景1 成功") || !strings.Contains(wp, "场景2 修复") {
-		t.Errorf("expected multi-flag WP to contain scenario notes, got:\n%s", wp)
+	for _, forbidden := range []string{
+		"<details", "<summary", "[!IMPORTANT]", "[!TIP]", "[!NOTE]",
+		"exec-1", "exec-2", "人工确认本题候选答案", "SHA-256",
+	} {
+		if strings.Contains(wp, forbidden) {
+			t.Errorf("expected WP NOT to contain %q, got:\n%s", forbidden, wp)
+		}
 	}
 }

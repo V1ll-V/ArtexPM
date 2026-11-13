@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { CTFCandidate, CTFExecution, CTFProgress, CTFWriteup } from "@/lib/types";
@@ -313,122 +314,132 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
           )}
         </CardContent>
       </Card>
-      <Card>
-        <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-          <CardTitle className="text-sm">解题报告（WP）</CardTitle>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant={wp?.is_optimized ? "outline" : "default"}
-              className={wp?.is_optimized ? "border-amber-500/40 text-amber-600 dark:text-amber-400" : "bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white shadow-sm"}
-              disabled={busy || optimizing}
-              onClick={handleOptimizeWP}
-            >
-              <SparklesIcon className={`size-3.5 ${optimizing ? "animate-spin" : ""}`} />
-              {optimizing ? "正在提炼优化…" : "优化 WP"}
-            </Button>
-            {wp?.is_optimized && (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy || optimizing}
-                onClick={handleResetWP}
-              >
-                <RotateCcwIcon className="size-3.5" />
-                恢复完整版
-              </Button>
-            )}
-            <Button size="sm" variant="outline" disabled={busy || optimizing} onClick={() => void refresh()}>
-              <RefreshCwIcon className={busy ? "animate-spin" : ""} />
-              刷新 WP
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!wp || optimizing}
-              onClick={async () => {
-                if (wp && (await copyText(wp.markdown))) toast.success("已复制 WP");
-              }}
-            >
-              <CopyIcon />
-              复制
-            </Button>
-            <Button
-              size="sm"
-              disabled={!wp || optimizing}
-              onClick={() =>
-                wp && download(new Blob([wp.markdown], { type: "text/markdown;charset=utf-8" }), `ctf-${taskId}-wp.md`)
-              }
-            >
-              <DownloadIcon />
-              下载 Markdown
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {error && (
-            <p role="alert" className="text-sm text-destructive">
-              {error}
-            </p>
-          )}
-          {wp && (
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="font-mono text-xs text-muted-foreground">
-                版本 {wp.revision.slice(0, 12)} · {new Date(wp.generated_at).toLocaleString()}
-              </p>
-              {wp.is_optimized ? (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400 border border-amber-500/20">
-                  <SparklesIcon className="size-3" />
-                  已优化：核心思路精简版（已去噪，含整体解题思路概述）
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
-                  完整审计过程版
-                </span>
-              )}
-            </div>
-          )}
-          <div className="max-h-[70vh] overflow-auto rounded-md border bg-muted/20 p-4">
-            {wp ? (
-              <Markdown text={wp.markdown} />
-            ) : (
-              <p className="text-sm text-muted-foreground">{busy ? "正在整理已有证据…" : "暂无 WP"}</p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">实际执行记录（最近 100 次）</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {executions.length === 0 && <p className="text-sm text-muted-foreground">尚无执行记录。</p>}
-          {executions.map((e) => (
-            <details className="rounded-md border p-3 text-xs" key={e.id}>
-              <summary className="cursor-pointer">
-                意图 #{e.intent_id} · {new Date(e.started_at).toLocaleString()} · exit {e.exit_code}{" "}
-                {e.error && "· 异常"}
-                {e.truncated && " · 输出已截断"}
-                {progress && e.input_hash !== progress.input_hash && " · 旧输入版本"}
-              </summary>
-              <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all">{e.command}</pre>
-              {e.error && <p className="mt-2 text-destructive">{e.error}</p>}
-              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all">
-                {e.stdout}
-                {e.stderr}
-              </pre>
-              <div className="mt-2 flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => log(e, "stdout")}>
-                  下载 stdout
+      <Tabs defaultValue="wp" className="space-y-3">
+        <TabsList>
+          <TabsTrigger value="wp">解题报告（Write-up）</TabsTrigger>
+          <TabsTrigger value="executions">原始执行记录 ({executions.length})</TabsTrigger>
+        </TabsList>
+        <TabsContent value="wp">
+          <Card>
+            <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
+              <CardTitle className="text-sm">解题报告（Write-up）</CardTitle>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant={wp?.is_optimized ? "outline" : "default"}
+                  className={wp?.is_optimized ? "border-amber-500/40 text-amber-600 dark:text-amber-400" : "bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white shadow-sm"}
+                  disabled={busy || optimizing}
+                  onClick={handleOptimizeWP}
+                >
+                  <SparklesIcon className={`size-3.5 ${optimizing ? "animate-spin" : ""}`} />
+                  {optimizing ? "正在精炼梳理…" : "AI 精炼 WP"}
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => log(e, "stderr")}>
-                  下载 stderr
+                {wp?.is_optimized && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy || optimizing}
+                    onClick={handleResetWP}
+                  >
+                    <RotateCcwIcon className="size-3.5" />
+                    恢复标准版
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" disabled={busy || optimizing} onClick={() => void refresh()}>
+                  <RefreshCwIcon className={busy ? "animate-spin" : ""} />
+                  刷新 WP
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!wp || optimizing}
+                  onClick={async () => {
+                    if (wp && (await copyText(wp.markdown))) toast.success("已复制 WP");
+                  }}
+                >
+                  <CopyIcon />
+                  复制
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!wp || optimizing}
+                  onClick={() =>
+                    wp && download(new Blob([wp.markdown], { type: "text/markdown;charset=utf-8" }), `ctf-${taskId}-wp.md`)
+                  }
+                >
+                  <DownloadIcon />
+                  下载 Markdown
                 </Button>
               </div>
-            </details>
-          ))}
-        </CardContent>
-      </Card>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {error && (
+                <p role="alert" className="text-sm text-destructive">
+                  {error}
+                </p>
+              )}
+              {wp && (
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-mono text-xs text-muted-foreground">
+                    版本 {wp.revision.slice(0, 12)} · {new Date(wp.generated_at).toLocaleString()}
+                  </p>
+                  {wp.is_optimized ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                      <SparklesIcon className="size-3" />
+                      AI 精炼 Write-up
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
+                      标准结构化 Write-up
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className="max-h-[70vh] overflow-auto rounded-md border bg-muted/20 p-4">
+                {wp ? (
+                  <Markdown text={wp.markdown} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">{busy ? "正在整理已有证据…" : "暂无 WP"}</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="executions">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">原始执行记录（最近 100 次）</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {executions.length === 0 && <p className="text-sm text-muted-foreground">尚无执行记录。</p>}
+              {executions.map((e) => (
+                <details className="rounded-md border p-3 text-xs" key={e.id}>
+                  <summary className="cursor-pointer">
+                    意图 #{e.intent_id} · {new Date(e.started_at).toLocaleString()} · exit {e.exit_code}{" "}
+                    {e.error && "· 异常"}
+                    {e.truncated && " · 输出已截断"}
+                    {progress && e.input_hash !== progress.input_hash && " · 旧输入版本"}
+                  </summary>
+                  <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all">{e.command}</pre>
+                  {e.error && <p className="mt-2 text-destructive">{e.error}</p>}
+                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all">
+                    {e.stdout}
+                    {e.stderr}
+                  </pre>
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" variant="outline" onClick={() => log(e, "stdout")}>
+                      下载 stdout
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => log(e, "stderr")}>
+                      下载 stderr
+                    </Button>
+                  </div>
+                </details>
+              ))}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

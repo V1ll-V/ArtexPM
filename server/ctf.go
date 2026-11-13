@@ -139,8 +139,17 @@ func (s *Server) decideCTFFlag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.State == "accepted" {
+		canOptimize := s.engine != nil && s.engine.ReadyFor(t)
 		go func() {
-			_, _ = svc.GenerateWP(context.Background(), task)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if canOptimize {
+				prov := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "mainagent"}
+				if _, optErr := svc.GenerateOptimizedWP(ctx, task, prov); optErr == nil {
+					return
+				}
+			}
+			_, _ = svc.GenerateWP(ctx, task)
 		}()
 	}
 	if t.lifecycleSnapshot().Status == "done" {

@@ -43,18 +43,66 @@ type effectiveStep struct {
 	IsWinner    bool
 }
 
+func extractUsefulFacts(facts []wpFact) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, f := range facts {
+		if f.State == "origin" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(f.Payload, &m); err != nil {
+			continue
+		}
+		if sub, _ := m["subtype"].(string); sub == "ctf_answer" || sub == "ctf_completion" {
+			continue
+		}
+		summary, _ := m["summary"].(string)
+		summary = strings.TrimSpace(summary)
+		if summary == "" {
+			if txt, _ := m["text"].(string); strings.TrimSpace(txt) != "" {
+				summary = strings.TrimSpace(txt)
+			}
+		}
+		if summary == "" || seen[summary] {
+			continue
+		}
+		seen[summary] = true
+		detail, _ := m["detail"].(string)
+		detail = strings.TrimSpace(detail)
+		if detail != "" && detail != summary && len([]rune(detail)) <= 240 {
+			out = append(out, fmt.Sprintf("%s（%s）", summary, detail))
+		} else {
+			out = append(out, summary)
+		}
+		if len(out) >= 10 {
+			break
+		}
+	}
+	return out
+}
+
 func isNoiseCommand(cmd string) bool {
 	c := strings.TrimSpace(cmd)
 	if c == "" {
 		return true
 	}
-	// Pure exploratory inspection commands with no transformation or exploit logic
+	noiseExact := []string{
+		"ls", "ls -la", "ls -al", "ls -la /work", "dir", "pwd", "whoami", "id", "uname", "uname -a", "env",
+		"cd /work && ls", "cd /work && ls -la", "cd /work; ls",
+	}
+	for _, e := range noiseExact {
+		if c == e {
+			return true
+		}
+	}
 	noisePrefixes := []string{
-		"ls", "dir", "pwd", "whoami", "id", "uname", "env",
-		"cd /work && ls", "cd /work; ls",
+		"ls ", "dir ", "pwd ", "whoami ", "uname ", "env ",
+		"which ", "command -v ", "type ", "cat /etc/", "getent ",
+		"cd /work && ls", "cd /work; ls", "find . -maxdepth",
 	}
 	for _, p := range noisePrefixes {
-		if c == p || strings.HasPrefix(c, p+" ") {
+		if strings.HasPrefix(c, p) {
 			return true
 		}
 	}
@@ -62,24 +110,26 @@ func isNoiseCommand(cmd string) bool {
 }
 
 func summarizeCommand(cmd string) string {
-	c := strings.TrimSpace(cmd)
+	c := strings.ToLower(strings.TrimSpace(cmd))
 	switch {
 	case strings.Contains(c, "unzip") || strings.Contains(c, "tar ") || strings.Contains(c, "7z "):
-		return "解压并提取题目附件文件"
-	case strings.Contains(c, "checksec"):
-		return "检查二进制安全缓解机制（Canary / NX / PIE / RELRO）"
-	case strings.Contains(c, "binwalk") || strings.Contains(c, "foremost"):
-		return "提取与分离文件末尾隐藏结构/内嵌文件"
-	case strings.Contains(c, "exiftool") || strings.Contains(c, "zsteg") || strings.Contains(c, "steghide"):
-		return "隐写与元数据检测分析"
-	case strings.Contains(c, "file ") || strings.Contains(c, "xxd") || strings.Contains(c, "strings"):
-		return "文件格式与魔数/敏感字符串初步审查"
-	case strings.Contains(c, "pcap") || strings.Contains(c, "tshark") || strings.Contains(c, "tcpdump") || strings.Contains(c, "scapy"):
-		return "流量包结构化分析与传输对象/会话提取"
-	case strings.Contains(c, "python") || strings.Contains(c, "./") || strings.Contains(c, "gdb"):
-		return "运行核心解题与求解/利用脚本"
+		return "解压题目附件并整理工作区文件"
+	case strings.Contains(c, "checksec") || strings.Contains(c, "readelf") || strings.Contains(c, "objdump"):
+		return "分析二进制保护机制与程序结构"
+	case strings.Contains(c, "binwalk") || strings.Contains(c, "foremost") || strings.Contains(c, "dd "):
+		return "扫描并分离隐藏数据或内嵌文件"
+	case strings.Contains(c, "exiftool") || strings.Contains(c, "zsteg") || strings.Contains(c, "steghide") || strings.Contains(c, "stegseek"):
+		return "检测文件元数据与隐写通道"
+	case strings.Contains(c, "pcap") || strings.Contains(c, "tshark") || strings.Contains(c, "tcpdump") || strings.Contains(c, "scapy") || strings.Contains(c, "pyshark"):
+		return "解析流量数据包并重组关键会话"
+	case strings.Contains(c, "curl ") || strings.Contains(c, "sqlmap") || strings.Contains(c, "requests"):
+		return "探测 Web 接口并验证漏洞利用路径"
+	case strings.Contains(c, "file ") || strings.Contains(c, "xxd") || strings.Contains(c, "strings "):
+		return "识别文件类型与关键特征字符串"
+	case strings.Contains(c, "python") || strings.Contains(c, "sage") || strings.Contains(c, "./") || strings.Contains(c, "gdb"):
+		return "编写并运行自动化求解 / 利用脚本"
 	default:
-		return "执行关键分析操作"
+		return "执行关键分析与验证步骤"
 	}
 }
 
@@ -88,7 +138,7 @@ func (s *Service) GenerateWP(ctx context.Context, task int64) (WP, error) {
 	optPath := filepath.Join(dir, "optimized.json")
 	if b, e := os.ReadFile(optPath); e == nil {
 		var opt WP
-		if err := json.Unmarshal(b, &opt); err == nil && opt.SHA256 == SHA([]byte(opt.Markdown)) {
+		if err := json.Unmarshal(b, &opt); err == nil && opt.SHA256 == SHA([]byte(opt.Markdown)) && strings.HasPrefix(opt.Revision, "opt-v2-") {
 			opt.IsOptimized = true
 			return opt, nil
 		}
@@ -152,7 +202,7 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 		return result, err
 	}
 
-	const wpGeneratorVersion = "v0.7.0"
+	const wpGeneratorVersion = "v0.8.0-clean-wp"
 	source := struct {
 		GeneratorVersion                           string
 		Task                                       int64
@@ -178,8 +228,44 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 		return result, e
 	}
 
-	// 1. Identify accepted or winning candidates
-	currentHash := Hash(m)
+	acceptedCands, confirmedCand, latestCand, winningExecID := classifyWPCandidates(candidates, Hash(m))
+	primaryScript, scriptData := s.findPrimaryScript(task, executions, winningExecID)
+	markdown := renderStandardChineseWP(name, description, goal, challenge, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+
+	result = WP{Revision: revision, Markdown: markdown, SHA256: SHA([]byte(markdown)), GeneratedAt: time.Now().UTC()}
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return result, err
+	}
+	raw, _ = json.MarshalIndent(result, "", "  ")
+	if err = os.WriteFile(p+".tmp", raw, 0600); err != nil {
+		return result, err
+	}
+	if err = os.Rename(p+".tmp", p); err != nil {
+		return result, err
+	}
+	if err = os.WriteFile(filepath.Join(dir, revision+".md"), []byte(result.Markdown), 0600); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (s *Service) loadWPFacts(ctx context.Context, exp int64) []wpFact {
+	facts := []wpFact{}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,state,payload FROM exploration_nodes WHERE exploration_id=$1 AND kind='fact' ORDER BY id LIMIT 300`, exp)
+	if err != nil {
+		return facts
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f wpFact
+		if err := rows.Scan(&f.ID, &f.State, &f.Payload); err == nil {
+			facts = append(facts, f)
+		}
+	}
+	return facts
+}
+
+func classifyWPCandidates(candidates []db.CTFCandidate, currentHash string) ([]*db.CTFCandidate, *db.CTFCandidate, *db.CTFCandidate, string) {
 	var acceptedCands []*db.CTFCandidate
 	var latestCand *db.CTFCandidate
 	for i := range candidates {
@@ -197,123 +283,21 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 	if len(acceptedCands) > 0 {
 		confirmedCand = acceptedCands[0]
 	}
-
 	winningExecID := ""
 	if confirmedCand != nil {
 		winningExecID = confirmedCand.ExecutionID
 	} else if latestCand != nil {
 		winningExecID = latestCand.ExecutionID
 	}
+	return acceptedCands, confirmedCand, latestCand, winningExecID
+}
 
-	// Map executions by ID
-	execMap := make(map[string]*db.CTFExecution)
+func (s *Service) findPrimaryScript(task int64, executions []db.CTFExecution, winningExecID string) (*Script, []byte) {
+	execMap := make(map[string]*db.CTFExecution, len(executions))
 	for i := range executions {
 		execMap[executions[i].ID] = &executions[i]
 	}
-
-	var b strings.Builder
-	if name == "" {
-		name = description
-	}
-	challengeLabel := strings.ToUpper(challenge)
-	if challengeLabel == "" || challengeLabel == "AUTO" {
-		challengeLabel = "CTF 综合 / 自动分析"
-	}
-
-	// Title and Summary Metadata
-	fmt.Fprintf(&b, "# 解题报告（Write-up）— %s\n\n", strings.ReplaceAll(name, "\n", " "))
-	if len(acceptedCands) > 1 {
-		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **多 Flag 解题成功已确认**：本题已累计确认 **%d 个有效 Flag**并在题目平台核验无误，以下为各场景解题步骤、PoC 与 Flag 汇总清单。\n\n", len(acceptedCands))
-	} else if confirmedCand != nil {
-		fmt.Fprintf(&b, "> [!IMPORTANT]\n> **解题成功已确认**：当前输入的答案已由用户确认并在题目平台核验无误，以下为整理后的精炼复现步骤与完整求解源码。\n\n")
-	} else if latestCand != nil {
-		fmt.Fprintf(&b, "> [!NOTE]\n> **阶段报告（解题草稿）**：已捕获候选 Flag（`%s`），正等待在题目平台进行提交验证。\n\n", latestCand.Value)
-	} else {
-		b.WriteString("> [!NOTE]\n> **阶段报告**：正在分析探索中，尚未捕获候选 Flag。\n\n")
-	}
-
-	b.WriteString("| 属性 | 内容 |\n| :--- | :--- |\n")
-	fmt.Fprintf(&b, "| **题目名称** | %s |\n", strings.ReplaceAll(name, "\n", " "))
-	fmt.Fprintf(&b, "| **赛题类别** | %s |\n", challengeLabel)
-	if len(acceptedCands) > 1 {
-		fmt.Fprintf(&b, "| **已确认 Flag** | 累计确认 **%d 个 Flag**（见下文汇总表） |\n", len(acceptedCands))
-	} else if confirmedCand != nil {
-		fmt.Fprintf(&b, "| **最终 Flag** | `%s` (平台验证确认) |\n", confirmedCand.Value)
-	} else if latestCand != nil {
-		fmt.Fprintf(&b, "| **当前候选** | `%s` (待确认) |\n", latestCand.Value)
-	} else {
-		b.WriteString("| **解题状态** | 正在分析探索中 |\n")
-	}
-	fmt.Fprintf(&b, "| **生成版本** | `%s` · %s |\n\n", revision[:12], time.Now().UTC().Format(time.RFC3339))
-
-	// 0x01 Challenge Overview
-	b.WriteString("## 0x01 题目概况与考点分析\n\n")
-	if description != "" {
-		fmt.Fprintf(&b, "**题目描述**：\n%s\n\n", description)
-	}
-	if goal != "" {
-		fmt.Fprintf(&b, "**交付目标**：\n%s\n\n", goal)
-	}
-
-	if len(m.Files) > 0 {
-		b.WriteString("### 附件清单与特征：\n")
-		for _, a := range m.Files {
-			fmt.Fprintf(&b, "- **`%s`**（%s）：大小 %d 字节，SHA-256 `%s`\n", a.Name, a.Role, a.Size, a.SHA256)
-		}
-		b.WriteString("\n")
-	}
-
-	// 0x02 Effective Steps (Noise-free causal steps)
-	b.WriteString("## 0x02 核心解题步骤（有效链路）\n\n")
-	seenCmds := make(map[string]bool)
-	var steps []effectiveStep
-
-	for _, e := range executions {
-		cmdTrimmed := strings.TrimSpace(e.Command)
-		if e.ExitCode != 0 && e.ID != winningExecID {
-			continue // Ignore failed test runs
-		}
-		if isNoiseCommand(cmdTrimmed) && e.ID != winningExecID {
-			continue // Filter out noise directory checks
-		}
-		if seenCmds[cmdTrimmed] && e.ID != winningExecID {
-			continue // Deduplicate identical commands
-		}
-		seenCmds[cmdTrimmed] = true
-
-		steps = append(steps, effectiveStep{
-			ExecutionID: e.ID,
-			Command:     e.Command,
-			Summary:     summarizeCommand(e.Command),
-			Stdout:      string(e.StdoutExcerpt),
-			IsWinner:    e.ID == winningExecID,
-		})
-	}
-
-	if len(steps) == 0 {
-		b.WriteString("当前尚无完整的有效执行步骤记录。\n\n")
-	} else {
-		for idx, st := range steps {
-			star := ""
-			if st.IsWinner {
-				star = " 🎯【关键 Flag 产出步骤】"
-			}
-			fmt.Fprintf(&b, "### 步骤 %d：%s%s\n\n", idx+1, st.Summary, star)
-			b.WriteString(fence(st.Command, "bash"))
-			if st.Stdout != "" && (st.IsWinner || len(steps) <= 5) {
-				b.WriteString("**关键输出回显**：\n")
-				b.WriteString(fence(strings.TrimSpace(st.Stdout), "text"))
-			}
-		}
-	}
-
-	// 0x03 Winning Exploit / Script
-	b.WriteString("## 0x03 核心求解脚本 (Exploit / PoC)\n\n")
-	var primaryScript *Script
-	var scriptData []byte
-
-	// Look in winning execution first, then search backwards
-	searchExecs := []*db.CTFExecution{}
+	searchExecs := make([]*db.CTFExecution, 0, len(executions))
 	if winningExecID != "" && execMap[winningExecID] != nil {
 		searchExecs = append(searchExecs, execMap[winningExecID])
 	}
@@ -322,126 +306,259 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 			searchExecs = append(searchExecs, &executions[i])
 		}
 	}
-
 	for _, e := range searchExecs {
 		var files []Script
-		if err = json.Unmarshal(e.Files, &files); err == nil && len(files) > 0 {
+		if err := json.Unmarshal(e.Files, &files); err == nil && len(files) > 0 {
 			for _, f := range files {
 				ext := strings.ToLower(filepath.Ext(f.Name))
 				if ext == ".py" || ext == ".sh" || ext == ".c" {
 					if d, er := s.EvidenceFile(task, f.Path, f.SHA256); er == nil && len(d) > 0 {
-						primaryScript = &f
-						scriptData = d
-						break
+						fCopy := f
+						return &fCopy, d
 					}
 				}
 			}
 		}
-		if primaryScript != nil {
+	}
+	return nil, nil
+}
+
+func pickEssentialSteps(executions []db.CTFExecution, winningExecID string, maxSteps int) []effectiveStep {
+	if maxSteps <= 0 {
+		maxSteps = 4
+	}
+	var filtered []db.CTFExecution
+	seen := make(map[string]bool)
+	for _, e := range executions {
+		cmd := strings.TrimSpace(e.Command)
+		if cmd == "" {
+			continue
+		}
+		if e.ExitCode != 0 && e.ID != winningExecID {
+			continue
+		}
+		if isNoiseCommand(cmd) && e.ID != winningExecID {
+			continue
+		}
+		if seen[cmd] && e.ID != winningExecID {
+			continue
+		}
+		seen[cmd] = true
+		filtered = append(filtered, e)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	var picked []db.CTFExecution
+	pickedIDs := make(map[string]bool)
+	// First pick up to 1 reconnaissance/analysis command before winning step
+	for _, e := range filtered {
+		if e.ID == winningExecID {
+			continue
+		}
+		low := strings.ToLower(e.Command)
+		if strings.Contains(low, "checksec") || strings.Contains(low, "unzip") ||
+			strings.Contains(low, "tar ") || strings.Contains(low, "tshark") ||
+			strings.Contains(low, "pcap") || strings.Contains(low, "binwalk") ||
+			strings.Contains(low, "exiftool") || strings.Contains(low, "strings ") ||
+			strings.Contains(low, "file ") || strings.Contains(low, "curl ") {
+			picked = append(picked, e)
+			pickedIDs[e.ID] = true
 			break
 		}
 	}
+	// Fill trailing non-winning steps up to maxSteps-1 so recent analytical scripts appear
+	var middle []db.CTFExecution
+	for _, e := range filtered {
+		if e.ID == winningExecID || pickedIDs[e.ID] {
+			continue
+		}
+		middle = append(middle, e)
+	}
+	room := maxSteps - len(picked)
+	if winningExecID != "" {
+		room--
+	}
+	if room > 0 && len(middle) > 0 {
+		start := len(middle) - room
+		if start < 0 {
+			start = 0
+		}
+		for _, e := range middle[start:] {
+			picked = append(picked, e)
+			pickedIDs[e.ID] = true
+		}
+	}
+	// Append winning execution last
+	if winningExecID != "" {
+		for _, e := range filtered {
+			if e.ID == winningExecID {
+				picked = append(picked, e)
+				break
+			}
+		}
+	}
 
+	steps := make([]effectiveStep, 0, len(picked))
+	for _, e := range picked {
+		summary := summarizeCommand(e.Command)
+		if e.ID == winningExecID {
+			summary = "运行核心求解脚本提取 Flag"
+		}
+		steps = append(steps, effectiveStep{
+			ExecutionID: e.ID,
+			Command:     e.Command,
+			Summary:     summary,
+			Stdout:      string(e.StdoutExcerpt),
+			IsWinner:    e.ID == winningExecID,
+		})
+	}
+	return steps
+}
+
+func renderStandardChineseWP(
+	name, description, goal, challenge string,
+	manifest artifacts.Manifest,
+	facts []wpFact,
+	executions []db.CTFExecution,
+	acceptedCands []*db.CTFCandidate,
+	confirmedCand *db.CTFCandidate,
+	latestCand *db.CTFCandidate,
+	winningExecID string,
+	primaryScript *Script,
+	scriptData []byte,
+) string {
+	var b strings.Builder
+	title := strings.TrimSpace(name)
+	if title == "" {
+		title = strings.TrimSpace(description)
+	}
+	if title == "" {
+		title = "CTF 赛题"
+	}
+	title = strings.ReplaceAll(title, "\n", " ")
+
+	challengeLabel := strings.ToUpper(strings.TrimSpace(challenge))
+	if challengeLabel == "" || challengeLabel == "AUTO" {
+		challengeLabel = "CTF 综合"
+	}
+
+	statusSummary := "分析探索中（暂未捕获候选 Flag）"
+	if len(acceptedCands) > 1 {
+		statusSummary = fmt.Sprintf("已验证确认 %d 个 Flag", len(acceptedCands))
+	} else if confirmedCand != nil {
+		statusSummary = fmt.Sprintf("已验证通过（`%s`）", confirmedCand.Value)
+	} else if latestCand != nil {
+		statusSummary = fmt.Sprintf("待人工确认（候选 `%s`）", latestCand.Value)
+	}
+
+	fmt.Fprintf(&b, "# Write-up — %s\n\n", title)
+
+	// 一、题目信息
+	b.WriteString("## 一、题目信息\n\n")
+	b.WriteString("| 项目 | 内容 |\n| :--- | :--- |\n")
+	fmt.Fprintf(&b, "| **题目名称** | %s |\n", title)
+	fmt.Fprintf(&b, "| **赛题类别** | %s |\n", challengeLabel)
+	fmt.Fprintf(&b, "| **当前状态** | %s |\n", statusSummary)
+	if len(manifest.Files) > 0 {
+		var fileNames []string
+		for _, f := range manifest.Files {
+			fileNames = append(fileNames, fmt.Sprintf("`%s` (%d B)", f.Name, f.Size))
+		}
+		fmt.Fprintf(&b, "| **题目附件** | %s |\n", strings.Join(fileNames, "、"))
+	}
+	b.WriteString("\n")
+	if strings.TrimSpace(description) != "" {
+		fmt.Fprintf(&b, "**题目描述**：%s\n\n", strings.TrimSpace(description))
+	}
+	if strings.TrimSpace(goal) != "" && strings.TrimSpace(goal) != strings.TrimSpace(description) {
+		fmt.Fprintf(&b, "**解题目标**：%s\n\n", strings.TrimSpace(goal))
+	}
+
+	// 二、解题思路
+	b.WriteString("## 二、解题思路\n\n")
+	b.WriteString(generateOverviewText(challenge, name, description, len(manifest.Files), primaryScript, statusSummary))
+	b.WriteString("\n\n")
+	if usefulFacts := extractUsefulFacts(facts); len(usefulFacts) > 0 {
+		b.WriteString("**关键分析发现**：\n")
+		for _, uf := range usefulFacts {
+			fmt.Fprintf(&b, "- %s\n", uf)
+		}
+		b.WriteString("\n")
+	}
+
+	// 三、关键步骤
+	b.WriteString("## 三、关键步骤\n\n")
+	steps := pickEssentialSteps(executions, winningExecID, 4)
+	if len(steps) == 0 {
+		b.WriteString("暂未记录可复现的关键命令步骤。\n\n")
+	} else {
+		for idx, st := range steps {
+			tag := ""
+			if st.IsWinner {
+				tag = "（命中 Flag）"
+			}
+			fmt.Fprintf(&b, "### %d. %s%s\n\n", idx+1, st.Summary, tag)
+			b.WriteString(fence(strings.TrimSpace(st.Command), "bash"))
+			if st.IsWinner && strings.TrimSpace(st.Stdout) != "" {
+				b.WriteString("**关键输出**：\n")
+				b.WriteString(fence(excerpt([]byte(strings.TrimSpace(st.Stdout)), 600), "text"))
+			}
+		}
+	}
+
+	// 四、核心 PoC / 利用脚本
+	b.WriteString("## 四、核心 PoC / 利用脚本\n\n")
 	if primaryScript != nil {
 		lang := strings.TrimPrefix(filepath.Ext(primaryScript.Name), ".")
 		if lang == "" {
 			lang = "python"
 		}
-		fmt.Fprintf(&b, "以下为解题过程中生成的完整求解脚本 (`%s`，SHA-256 `%s`)，可直接在准备好的工作区中复现执行：\n\n", primaryScript.Name, primaryScript.SHA256)
-		b.WriteString(fence(string(scriptData), lang))
-	} else if confirmedCand != nil && execMap[confirmedCand.ExecutionID] != nil {
-		b.WriteString("本题通过命令行链式指令直接取得 Flag，核心复现命令如下：\n\n")
-		b.WriteString(fence(execMap[confirmedCand.ExecutionID].Command, "bash"))
+		fmt.Fprintf(&b, "核心求解脚本 `%s`：\n\n", primaryScript.Name)
+		b.WriteString(fence(strings.TrimSpace(string(scriptData)), lang))
 	} else {
-		b.WriteString("本阶段暂未持久化独立的解题脚本文件。\n\n")
+		var winCmd string
+		for _, e := range executions {
+			if e.ID == winningExecID {
+				winCmd = strings.TrimSpace(e.Command)
+				break
+			}
+		}
+		if winCmd != "" {
+			b.WriteString("核心复现命令：\n\n")
+			b.WriteString(fence(winCmd, "bash"))
+		} else {
+			b.WriteString("暂未持久化独立求解脚本，详见上述关键步骤。\n\n")
+		}
 	}
 
-	// 0x04 Verification and Flag
-	b.WriteString("## 0x04 验证结果与 Flag\n\n")
+	// 五、获取 Flag
+	b.WriteString("## 五、获取 Flag\n\n")
 	if len(acceptedCands) > 1 {
-		fmt.Fprintf(&b, "本题为多场景 / 多 Flag 赛题，目前已在题目平台核验并确认 **%d 个有效 Flag**：\n\n", len(acceptedCands))
-		b.WriteString("| 序号 | 关联场景 / 验证备注 | 最终 Flag | 来源执行记录 |\n| :---: | :--- | :--- | :--- |\n")
+		fmt.Fprintf(&b, "本题共确认 **%d 个有效 Flag**：\n\n", len(acceptedCands))
+		b.WriteString("| 序号 | 场景 / 备注 | Flag |\n| :---: | :--- | :--- |\n")
 		for idx, ac := range acceptedCands {
-			note := ac.Notes
+			note := strings.TrimSpace(ac.Notes)
 			if note == "" {
 				note = fmt.Sprintf("Flag %d", idx+1)
 			}
-			fmt.Fprintf(&b, "| %d | %s | `%s` | `%s` |\n", idx+1, strings.ReplaceAll(note, "|", "-"), ac.Value, ac.ExecutionID)
+			fmt.Fprintf(&b, "| %d | %s | `%s` |\n", idx+1, strings.ReplaceAll(note, "|", "-"), ac.Value)
 		}
 		b.WriteString("\n")
 	} else if confirmedCand != nil {
-		fmt.Fprintf(&b, "- **最终验证 Flag**：`%s`\n", confirmedCand.Value)
-		fmt.Fprintf(&b, "- **验证状态**：已由用户在题目平台提交并确认为正确答案（Accepted）\n")
-		if confirmedCand.Notes != "" {
-			fmt.Fprintf(&b, "- **用户验证备注**：%s\n", confirmedCand.Notes)
+		fmt.Fprintf(&b, "- **最终 Flag**：`%s`\n", confirmedCand.Value)
+		if strings.TrimSpace(confirmedCand.Notes) != "" {
+			fmt.Fprintf(&b, "- **验证说明**：%s\n", strings.TrimSpace(confirmedCand.Notes))
 		}
-		fmt.Fprintf(&b, "- **来源执行记录**：`%s`\n\n", confirmedCand.ExecutionID)
+		b.WriteString("\n")
 	} else if latestCand != nil {
-		fmt.Fprintf(&b, "- **当前命中 Flag**：`%s`\n", latestCand.Value)
-		fmt.Fprintf(&b, "- **验证状态**：待人工在题目平台确认（Pending Confirmation）\n")
-		fmt.Fprintf(&b, "- **来源执行记录**：`%s`\n\n", latestCand.ExecutionID)
+		fmt.Fprintf(&b, "- **候选 Flag**：`%s`（待平台核验）\n\n", latestCand.Value)
 	} else {
-		b.WriteString("尚未取得符合目标格式的 Flag。\n\n")
+		b.WriteString("尚未获取最终 Flag。\n\n")
 	}
 
-	// Appendix: Audit Trail (Collapsible)
-	b.WriteString("---\n\n")
-	fmt.Fprintf(&b, "<details>\n<summary><b>点击展开：完整原始执行证据链与安全审计日志（共 %d 次执行）</b></summary>\n\n", len(executions))
-	b.WriteString("> 此处保留沙箱容器内运行的全部历史命令、执行耗时、退出码与日志 SHA-256 校验和，确保复现证据链完整不可篡改。\n\n")
-
-	scripts := map[string]bool{}
-	for i := len(executions) - 1; i >= 0; i-- {
-		e := executions[i]
-		fmt.Fprintf(&b, "#### 执行记录 `%s`\n", e.ID)
-		fmt.Fprintf(&b, "- 意图：%d · 时间：%s · 退出码：%d\n", e.IntentID, e.StartedAt.UTC().Format(time.RFC3339), e.ExitCode)
-		if e.InputHash != currentHash {
-			b.WriteString("- 状态：旧输入版本\n")
-		}
-		b.WriteString("\n")
-		b.WriteString(fence(e.Command, "bash"))
-		if e.Error != "" {
-			fmt.Fprintf(&b, "**执行异常**：%s\n\n", e.Error)
-		}
-		for _, log := range []struct{ name, path, hash string }{{"stdout", e.StdoutPath, e.StdoutSHA}, {"stderr", e.StderrPath, e.StderrSHA}} {
-			data, er := s.EvidenceFile(task, log.path, log.hash)
-			if er == nil && len(data) > 0 {
-				fmt.Fprintf(&b, "**%s** (SHA-256: `%s`):\n", log.name, log.hash)
-				b.WriteString(fence(excerpt(data, 4000), "text"))
-			}
-		}
-		var files []Script
-		if err = json.Unmarshal(e.Files, &files); err == nil {
-			for _, f := range files {
-				if !scripts[f.SHA256] {
-					scripts[f.SHA256] = true
-					if d, er := s.EvidenceFile(task, f.Path, f.SHA256); er == nil && len(d) > 0 {
-						fmt.Fprintf(&b, "**快照文件** `%s` (SHA-256: `%s`):\n", f.Name, f.SHA256)
-						if len(d) <= 8000 {
-							b.WriteString(fence(string(d), strings.TrimPrefix(filepath.Ext(f.Name), ".")))
-						}
-					}
-				}
-			}
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString("</details>\n")
-
-	result = WP{Revision: revision, Markdown: b.String(), SHA256: SHA([]byte(b.String())), GeneratedAt: time.Now().UTC()}
-	if err = os.MkdirAll(dir, 0700); err != nil {
-		return result, err
-	}
-	raw, _ = json.MarshalIndent(result, "", "  ")
-	if err = os.WriteFile(p+".tmp", raw, 0600); err != nil {
-		return result, err
-	}
-	if err = os.Rename(p+".tmp", p); err != nil {
-		return result, err
-	}
-	if err = os.WriteFile(filepath.Join(dir, revision+".md"), []byte(result.Markdown), 0600); err != nil {
-		return result, err
-	}
-	return result, nil
+	return b.String()
 }
 
 func generateOverviewText(challenge, name, description string, fileCount int, script *Script, flagVal string) string {
@@ -465,6 +582,7 @@ func generateOverviewText(challenge, name, description string, fileCount int, sc
 func (s *Service) generateDeterministicOptimizedWP(
 	name, description, goal, challenge string,
 	manifest artifacts.Manifest,
+	facts []wpFact,
 	executions []db.CTFExecution,
 	acceptedCands []*db.CTFCandidate,
 	confirmedCand *db.CTFCandidate,
@@ -473,189 +591,12 @@ func (s *Service) generateDeterministicOptimizedWP(
 	primaryScript *Script,
 	scriptData []byte,
 ) string {
-	var b strings.Builder
-	if name == "" {
-		name = description
-	}
-	challengeLabel := strings.ToUpper(challenge)
-	if challengeLabel == "" || challengeLabel == "AUTO" {
-		challengeLabel = "CTF 综合 / 自动分析"
-	}
-
-	flagVal := "待验证"
-	if len(acceptedCands) > 1 {
-		flagVal = fmt.Sprintf("累计 %d 个已确认 Flag", len(acceptedCands))
-	} else if confirmedCand != nil {
-		flagVal = confirmedCand.Value
-	} else if latestCand != nil {
-		flagVal = latestCand.Value
-	}
-
-	fmt.Fprintf(&b, "# 【核心精炼】解题报告（Write-up）— %s\n\n", strings.ReplaceAll(name, "\n", " "))
-	b.WriteString("> [!TIP]\n> **比赛级精简题解报告（已过滤冗余试错与无关过程）**：本报告仅保留赛题整体解题思路概述、核心考点突破、最小必要复现链路以及完整可复现的 Exploit / PoC 脚本。\n\n")
-
-	b.WriteString("| 赛题属性 | 说明 |\n| :--- | :--- |\n")
-	fmt.Fprintf(&b, "| **赛题名称** | %s |\n", strings.ReplaceAll(name, "\n", " "))
-	fmt.Fprintf(&b, "| **赛题类别** | %s |\n", challengeLabel)
-	if len(acceptedCands) > 1 {
-		fmt.Fprintf(&b, "| **已确认 Flag** | 累计确认 **%d 个有效 Flag**（见下文清单） |\n", len(acceptedCands))
-	} else if confirmedCand != nil {
-		fmt.Fprintf(&b, "| **最终 Flag** | `%s` (平台验证确认) |\n", confirmedCand.Value)
-	} else if latestCand != nil {
-		fmt.Fprintf(&b, "| **当前命中 Flag** | `%s` (待平台核验) |\n", latestCand.Value)
-	} else {
-		b.WriteString("| **最终 Flag** | 尚未捕获有效 Flag |\n")
-	}
-	if primaryScript != nil {
-		fmt.Fprintf(&b, "| **核心 PoC 脚本** | `%s` |\n", primaryScript.Name)
-	}
-	b.WriteString("| **报告模式** | ✨ 核心精简版（已重新梳理） |\n\n")
-
-	// Overview section at the very beginning
-	b.WriteString("## 整体解题思路概述 (Solution Overview)\n\n")
-	b.WriteString(generateOverviewText(challenge, name, description, len(manifest.Files), primaryScript, flagVal))
-	b.WriteString("\n\n---\n\n")
-
-	// 0x01 Challenge Overview
-	b.WriteString("## 0x01 题目概况与关键考点 (Core Concept)\n\n")
-	if description != "" {
-		fmt.Fprintf(&b, "**题目描述**：\n%s\n\n", description)
-	}
-	if goal != "" {
-		fmt.Fprintf(&b, "**交付目标**：\n%s\n\n", goal)
-	}
-	if len(manifest.Files) > 0 {
-		b.WriteString("**目标附件清单**：\n")
-		for _, f := range manifest.Files {
-			fmt.Fprintf(&b, "- `%s` (%s, %d 字节, SHA-256 `%s`)\n", f.Name, f.Role, f.Size, f.SHA256[:16]+"...")
-		}
-		b.WriteString("\n")
-	}
-
-	// 0x02 Minimal Necessary Steps
-	b.WriteString("## 0x02 最小有效解题路径 (Minimal Reproduction Steps)\n\n")
-	var essentialSteps []effectiveStep
-
-	// Step 1: initial setup or detection command
-	for _, e := range executions {
-		cmd := strings.TrimSpace(e.Command)
-		if e.ExitCode == 0 && !isNoiseCommand(cmd) && e.ID != winningExecID {
-			if strings.Contains(cmd, "checksec") || strings.Contains(cmd, "unzip") ||
-				strings.Contains(cmd, "tar ") || strings.Contains(cmd, "pcap") ||
-				strings.Contains(cmd, "probe") || strings.Contains(cmd, "binwalk") ||
-				strings.Contains(cmd, "exiftool") {
-				essentialSteps = append(essentialSteps, effectiveStep{
-					ExecutionID: e.ID,
-					Command:     e.Command,
-					Summary:     summarizeCommand(e.Command),
-					Stdout:      e.StdoutExcerpt,
-				})
-				break
-			}
-		}
-	}
-
-	// Step 2: winning execution
-	for _, e := range executions {
-		if e.ID == winningExecID {
-			essentialSteps = append(essentialSteps, effectiveStep{
-				ExecutionID: e.ID,
-				Command:     e.Command,
-				Summary:     "运行核心求解脚本触发漏洞并提取 Flag",
-				Stdout:      e.StdoutExcerpt,
-				IsWinner:    true,
-			})
-			break
-		}
-	}
-
-	if len(essentialSteps) == 0 {
-		count := 0
-		for _, e := range executions {
-			cmd := strings.TrimSpace(e.Command)
-			if e.ExitCode == 0 && !isNoiseCommand(cmd) {
-				essentialSteps = append(essentialSteps, effectiveStep{
-					ExecutionID: e.ID,
-					Command:     e.Command,
-					Summary:     summarizeCommand(e.Command),
-					Stdout:      e.StdoutExcerpt,
-					IsWinner:    e.ID == winningExecID,
-				})
-				count++
-				if count >= 2 {
-					break
-				}
-			}
-		}
-	}
-
-	if len(essentialSteps) == 0 {
-		b.WriteString("本阶段暂无有效关键命令记录。\n\n")
-	} else {
-		for idx, st := range essentialSteps {
-			star := ""
-			if st.IsWinner {
-				star = " 🎯【直击 Flag 产出】"
-			}
-			fmt.Fprintf(&b, "### 步骤 %d：%s%s\n\n", idx+1, st.Summary, star)
-			b.WriteString(fence(st.Command, "bash"))
-			if st.Stdout != "" {
-				b.WriteString("**执行回显**：\n")
-				b.WriteString(fence(strings.TrimSpace(st.Stdout), "text"))
-			}
-		}
-	}
-
-	// 0x03 Winning Exploit / PoC
-	b.WriteString("## 0x03 核心求解脚本 (Exploit / PoC 源码)\n\n")
-	if primaryScript != nil {
-		lang := strings.TrimPrefix(filepath.Ext(primaryScript.Name), ".")
-		if lang == "" {
-			lang = "python"
-		}
-		fmt.Fprintf(&b, "以下为获取 Flag 的完整求解脚本 (`%s`，SHA-256 `%s`)，具备独立复现性：\n\n", primaryScript.Name, primaryScript.SHA256)
-		b.WriteString(fence(string(scriptData), lang))
-	} else if confirmedCand != nil && winningExecID != "" {
-		for _, e := range executions {
-			if e.ID == winningExecID {
-				b.WriteString("本题通过核心单行链式指令直接取得 Flag：\n\n")
-				b.WriteString(fence(e.Command, "bash"))
-				break
-			}
-		}
-	} else {
-		b.WriteString("本题暂未独立保存脚本文件。\n\n")
-	}
-
-	// 0x04 Verification and Flag
-	b.WriteString("## 0x04 验证结果与最终 Flag\n\n")
-	if len(acceptedCands) > 1 {
-		fmt.Fprintf(&b, "本题已累计核验并确认 **%d 个有效 Flag**：\n\n", len(acceptedCands))
-		b.WriteString("| 序号 | 关联场景 / 验证备注 | 最终 Flag | 来源执行 ID |\n| :---: | :--- | :--- | :--- |\n")
-		for idx, ac := range acceptedCands {
-			note := ac.Notes
-			if note == "" {
-				note = fmt.Sprintf("Flag %d", idx+1)
-			}
-			fmt.Fprintf(&b, "| %d | %s | `%s` | `%s` |\n", idx+1, strings.ReplaceAll(note, "|", "-"), ac.Value, ac.ExecutionID)
-		}
-		b.WriteString("\n")
-	} else if confirmedCand != nil {
-		fmt.Fprintf(&b, "- **最终验证 Flag**：`%s`\n", confirmedCand.Value)
-		fmt.Fprintf(&b, "- **验证状态**：已由用户在题目平台提交并确认为正确答案（Accepted）\n")
-		if confirmedCand.Notes != "" {
-			fmt.Fprintf(&b, "- **验证反馈备注**：%s\n", confirmedCand.Notes)
-		}
-		fmt.Fprintf(&b, "- **来源执行记录**：`%s`\n", confirmedCand.ExecutionID)
-	} else if latestCand != nil {
-		fmt.Fprintf(&b, "- **当前命中 Flag**：`%s`\n", latestCand.Value)
-		fmt.Fprintf(&b, "- **验证状态**：待人工在题目平台确认（Pending Confirmation）\n")
-		fmt.Fprintf(&b, "- **来源执行记录**：`%s`\n", latestCand.ExecutionID)
-	} else {
-		b.WriteString("尚未取得符合目标格式的 Flag。\n")
-	}
-
-	return b.String()
+	return renderStandardChineseWP(
+		name, description, goal, challenge,
+		manifest, facts, executions,
+		acceptedCands, confirmedCand, latestCand,
+		winningExecID, primaryScript, scriptData,
+	)
 }
 
 func (s *Service) llmOptimizeWP(
@@ -663,6 +604,7 @@ func (s *Service) llmOptimizeWP(
 	prov llm.Provider,
 	name, description, goal, challenge string,
 	manifest artifacts.Manifest,
+	facts []wpFact,
 	executions []db.CTFExecution,
 	acceptedCands []*db.CTFCandidate,
 	confirmedCand *db.CTFCandidate,
@@ -675,18 +617,27 @@ func (s *Service) llmOptimizeWP(
 		return ""
 	}
 
-	systemPrompt := `你是一名世界顶级 CTF 战队队长与安全专家。请根据提供的赛题信息、真实执行记录与最终产出 Flag 的求解代码，整理出一份极其精炼、逻辑严密、直击要害的比赛标准 Write-up。
-【强制要求】：
-1. 最前面必须包含一段深入浅出的【整体解题思路概述 (Solution Overview)】，概括整个赛题的考察本质与解法全貌。
-2. 极简主义：彻底去除所有无关的探索尝试、调试试错、查看目录、重复查看文件或报错日志，只保留走向正确 Flag 的最小关键路径。
-3. 规范结构：
-   - 整体解题思路概述 (Solution Overview)
-   - 0x01 题目概况与核心考点
-   - 0x02 最小有效复现步骤（只保留 2~4 个不可或缺的关键动作）
-   - 0x03 核心求解脚本 (Exploit / PoC 完整源码，必须完整展示，便于一键独立复现）
-   - 0x04 验证结果与最终 Flag
-4. 严禁捏造未执行的命令；必须保留真实捕获的 Flag 与求解脚本源码。
-5. 直接输出标准 GitHub 风格 Markdown 文本，不要带有最外层的包装标记。`
+	systemPrompt := `你是一名国内顶级 CTF 战队队长与安全研究员。请根据提供的赛题信息、关键分析结论（Facts）、核心命令与求解脚本，整理出一份符合国内标准竞赛风格、重点突出、简洁易读的中文 Write-up。
+
+【强制结构】（严格使用以下 5 个二级标题，不要增删主结构）：
+# Write-up — <题目名称>
+## 一、题目信息
+（简要列出题目名称、类别、附件/环境信息与核心考察点）
+## 二、解题思路
+（先用一段话概括整体解法与突破口，再用 2~4 条简洁的中文要点讲清楚分析推理逻辑）
+## 三、关键步骤
+（只保留 2~4 个真正推进解题的最小关键动作：每步用一句中文小标题 + 核心命令或关键发现说明）
+## 四、核心 PoC / 利用脚本
+（完整贴出最终用于获取 Flag 的 PoC 脚本源码或一键复现命令，不要截断或省略核心逻辑）
+## 五、获取 Flag
+（若只有一个 Flag 直接给出；若存在多个已确认 Flag，使用简洁的 Markdown 表格列出全部场景备注与 Flag）
+
+【严格禁忌】：
+1. 绝对禁止输出 <details>、<summary> 等 HTML 标签，也禁止输出 > [!TIP]、> [!NOTE]、> [!IMPORTANT] 等 GitHub Alert 语法。
+2. 绝对禁止出现任何 UUID / execution_id / intent_id、SHA-256 哈希值、RFC3339 时间戳或退出码审计流水账。
+3. 彻底过滤所有 ls/pwd/which 等目录探测和失败试错记录。
+4. 严禁捏造未实际出现的命令、文件或 Flag，必须原样保留真实捕获的 Flag 与核心源码。
+5. 直接输出纯 Markdown 文本，不要最外层代码块包裹。`
 
 	flagVal := "待验证"
 	if len(acceptedCands) > 1 {
@@ -695,6 +646,11 @@ func (s *Service) llmOptimizeWP(
 		flagVal = confirmedCand.Value
 	} else if latestCand != nil {
 		flagVal = latestCand.Value
+	}
+
+	var attachmentList []string
+	for _, f := range manifest.Files {
+		attachmentList = append(attachmentList, fmt.Sprintf("%s (%d B)", f.Name, f.Size))
 	}
 
 	pocCode := ""
@@ -718,32 +674,44 @@ func (s *Service) llmOptimizeWP(
 			usefulCmds = append(usefulCmds, c)
 		}
 	}
-	if len(usefulCmds) > 10 {
-		usefulCmds = usefulCmds[len(usefulCmds)-10:]
+	if len(usefulCmds) > 8 {
+		usefulCmds = usefulCmds[len(usefulCmds)-8:]
+	}
+
+	factsSection := "无额外结构化结论"
+	if usefulFacts := extractUsefulFacts(facts); len(usefulFacts) > 0 {
+		factsSection = "- " + strings.Join(usefulFacts, "\n- ")
 	}
 
 	multiFlagSection := ""
 	if len(acceptedCands) > 1 {
 		multiFlagSection = fmt.Sprintf("【已确认有效 Flag 清单（共 %d 个）】：\n", len(acceptedCands))
 		for i, ac := range acceptedCands {
-			multiFlagSection += fmt.Sprintf("- [%d] 场景/备注：%s | Flag：%s | 来源执行：%s\n", i+1, ac.Notes, ac.Value, ac.ExecutionID)
+			note := strings.TrimSpace(ac.Notes)
+			if note == "" {
+				note = fmt.Sprintf("Flag %d", i+1)
+			}
+			multiFlagSection += fmt.Sprintf("- [%d] 场景/备注：%s | Flag：%s\n", i+1, note, ac.Value)
 		}
-		multiFlagSection += "\n请在 0x04 验证结果与最终 Flag 章节中以表格形式完整列出这全部已确认的 Flag 与场景备注。\n\n"
+		multiFlagSection += "\n请在「五、获取 Flag」章节中用表格完整列出这些 Flag 与场景备注。\n\n"
 	}
 
 	userContent := fmt.Sprintf(`【赛题名称】：%s
 【赛题类别】：%s
+【题目附件】：%s
 【题目描述】：%s
 【交付目标】：%s
-【最终验证 Flag】：%s
-%s【关键成功命令】：
+【最终 Flag】：%s
+%s【关键分析结论（Facts）】：
+%s
+【命中 Flag 的关键命令】：
 %s
 【关键回显输出】：
 %s
 【核心求解 PoC / Exploit 脚本】：
 %s
-【精选有效命令历史】：
-%s`, name, challenge, description, goal, flagVal, multiFlagSection, winningCmd, winningOutput, pocCode, strings.Join(usefulCmds, "\n"))
+【精选关键命令历史】：
+%s`, name, challenge, strings.Join(attachmentList, "、"), description, goal, flagVal, multiFlagSection, factsSection, winningCmd, winningOutput, pocCode, strings.Join(usefulCmds, "\n"))
 
 	llmCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -751,7 +719,7 @@ func (s *Service) llmOptimizeWP(
 	msg, _, _, err := prov.Complete(llmCtx, llm.CompletionRequest{
 		System:    []string{systemPrompt},
 		Messages:  []llm.Message{llm.UserText(userContent)},
-		MaxTokens: 8000,
+		MaxTokens: 6000,
 		Thinking:  "disabled",
 	})
 	if err != nil {
@@ -799,78 +767,20 @@ func (s *Service) GenerateOptimizedWP(ctx context.Context, task int64, prov llm.
 	if err != nil {
 		return result, err
 	}
+	facts := s.loadWPFacts(ctx, exp)
 
-	currentHash := Hash(m)
-	var acceptedCands []*db.CTFCandidate
-	var latestCand *db.CTFCandidate
-	for i := range candidates {
-		c := &candidates[i]
-		if c.InputHash != currentHash {
-			continue
-		}
-		if c.State == "accepted" {
-			acceptedCands = append(acceptedCands, c)
-		} else if c.State == "candidate" && latestCand == nil {
-			latestCand = c
-		}
-	}
-	var confirmedCand *db.CTFCandidate
-	if len(acceptedCands) > 0 {
-		confirmedCand = acceptedCands[0]
-	}
-
-	winningExecID := ""
-	if confirmedCand != nil {
-		winningExecID = confirmedCand.ExecutionID
-	} else if latestCand != nil {
-		winningExecID = latestCand.ExecutionID
-	}
-
-	execMap := make(map[string]*db.CTFExecution)
-	for i := range executions {
-		execMap[executions[i].ID] = &executions[i]
-	}
-
-	// Find primary script
-	var primaryScript *Script
-	var scriptData []byte
-	searchExecs := []*db.CTFExecution{}
-	if winningExecID != "" && execMap[winningExecID] != nil {
-		searchExecs = append(searchExecs, execMap[winningExecID])
-	}
-	for i := len(executions) - 1; i >= 0; i-- {
-		if winningExecID == "" || executions[i].ID != winningExecID {
-			searchExecs = append(searchExecs, &executions[i])
-		}
-	}
-	for _, e := range searchExecs {
-		var files []Script
-		if err = json.Unmarshal(e.Files, &files); err == nil && len(files) > 0 {
-			for _, f := range files {
-				ext := strings.ToLower(filepath.Ext(f.Name))
-				if ext == ".py" || ext == ".sh" || ext == ".c" {
-					if d, er := s.EvidenceFile(task, f.Path, f.SHA256); er == nil && len(d) > 0 {
-						primaryScript = &f
-						scriptData = d
-						break
-					}
-				}
-			}
-		}
-		if primaryScript != nil {
-			break
-		}
-	}
+	acceptedCands, confirmedCand, latestCand, winningExecID := classifyWPCandidates(candidates, Hash(m))
+	primaryScript, scriptData := s.findPrimaryScript(task, executions, winningExecID)
 
 	optimizedMarkdown := ""
 	if prov != nil {
-		optimizedMarkdown = s.llmOptimizeWP(ctx, prov, name, description, goal, challenge, m, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+		optimizedMarkdown = s.llmOptimizeWP(ctx, prov, name, description, goal, challenge, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
 	}
 	if strings.TrimSpace(optimizedMarkdown) == "" {
-		optimizedMarkdown = s.generateDeterministicOptimizedWP(name, description, goal, challenge, m, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+		optimizedMarkdown = s.generateDeterministicOptimizedWP(name, description, goal, challenge, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
 	}
 
-	revision := "opt-" + SHA([]byte(optimizedMarkdown))[:16]
+	revision := "opt-v2-" + SHA([]byte(optimizedMarkdown))[:16]
 	result = WP{
 		Revision:    revision,
 		Markdown:    optimizedMarkdown,

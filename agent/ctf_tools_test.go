@@ -50,3 +50,32 @@ func TestCTFAssemblyCannotAcquireHostShell(t *testing.T) {
 		}
 	}
 }
+
+func TestCTFBaseForPlannerStripsExecutionTools(t *testing.T) {
+	base := []actool.CoreTool{
+		readTool("Bash", "bash", obj(nil), nil),
+		readTool("Read", "read", obj(nil), nil),
+		readTool("LS", "ls", obj(nil), nil),
+		readTool("ctf_python", "py", obj(nil), nil),
+		readTool("ctf_http", "http", obj(nil), nil),
+		readTool("add_intent", "add intent", obj(nil), nil),
+		readTool("record_fact", "record fact", obj(nil), nil),
+	}
+	filtered := stripCTFPlannerBase(base)
+	names := make(map[string]bool, len(filtered))
+	for _, tl := range filtered {
+		names[tl.Name()] = true
+	}
+	if !names["add_intent"] {
+		t.Fatal("expected add_intent to be preserved for CTF planner")
+	}
+	for _, forbidden := range []string{"Bash", "Read", "LS", "ctf_python", "ctf_http", "ctf_pcap"} {
+		if names[forbidden] {
+			t.Fatalf("expected execution tool %s to be stripped from CTF planner", forbidden)
+		}
+	}
+	ctxOut, nilOut := ctfBaseForPlanner(t.Context(), nil, base)
+	if ctxOut == nil || len(nilOut) != len(base) {
+		t.Fatalf("expected nil store fallback to preserve base tools, got %d", len(nilOut))
+	}
+}
