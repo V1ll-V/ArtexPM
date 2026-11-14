@@ -593,12 +593,18 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		reason = ReasonCTFSubmission
 		if ts != nil && tsx.Writes().Facts == 0 {
 			if cand, cerr := ts.Database().PendingCTFSubmission(ctx, taskID); cerr == nil && cand != nil {
-				detail := fmt.Sprintf("执行记录 %s 捕获候选 Flag `%s`", cand.ExecutionID, cand.Value)
+				summaryPrefix := "捕获候选 Flag："
+				detailPrefix := "捕获候选 Flag"
+				if cand.Kind == db.CTFCandidateExploitProof {
+					summaryPrefix = "提交漏洞利用证明候选："
+					detailPrefix = "完成漏洞利用并提交证明"
+				}
+				detail := fmt.Sprintf("执行记录 %s %s `%s`", cand.ExecutionID, detailPrefix, cand.Value)
 				if ex, exErr := ts.Database().CTFExecution(ctx, taskID, cand.ExecutionID); exErr == nil && strings.TrimSpace(ex.Command) != "" {
-					detail = fmt.Sprintf("执行命令 `%s` 捕获候选 Flag `%s`", truncOutput(strings.TrimSpace(ex.Command), 240), cand.Value)
+					detail = fmt.Sprintf("执行命令 `%s` %s `%s`", truncOutput(strings.TrimSpace(ex.Command), 240), detailPrefix, cand.Value)
 				}
 				if fid, ferr := ts.AddNode("fact", map[string]any{
-					"summary":    fmt.Sprintf("捕获候选 Flag：%s", cand.Value),
+					"summary":    summaryPrefix + cand.Value,
 					"detail":     detail,
 					"evidence":   fmt.Sprintf("execution=%s", cand.ExecutionID),
 					"confidence": "observed",

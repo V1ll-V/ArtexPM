@@ -406,6 +406,11 @@ function TaskDetailInner() {
         {task.mode === "ctf" && (
           <p className="text-xs text-muted-foreground">
             CTF · {task.challenge_type === "reverse" ? "RE" : (task.challenge_type || "auto").toUpperCase()}
+            {task.ctf_verify_mode === "exploit_proof"
+              ? " · 漏洞利用证明（无需 Flag）"
+              : task.ctf_verify_mode === "flag_and_exploit"
+              ? " · 复合验收（Flag + 漏洞利用）"
+              : " · Flag 验收"}
             {task.ctf_vpn_enabled ? ` · WireGuard VPN (${task.ctf_vpn_filename || "wg0.conf"})` : ""}
           </p>
         )}

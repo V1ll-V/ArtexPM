@@ -166,11 +166,12 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 	if err := s.Sync(ctx, task); err != nil {
 		return result, err
 	}
-	var name, description, goal, status, challenge string
+	var name, description, goal, status, challenge, rawVerify string
 	var exp int64
-	if err := s.DB.QueryRowContext(ctx, `SELECT name,description,goal,status,challenge_type,exploration_id FROM tasks WHERE id=$1 AND mode='ctf' AND deleted_at IS NULL`, task).Scan(&name, &description, &goal, &status, &challenge, &exp); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT name,description,goal,status,challenge_type,exploration_id,COALESCE(ctf_verify_mode,'') FROM tasks WHERE id=$1 AND mode='ctf' AND deleted_at IS NULL`, task).Scan(&name, &description, &goal, &status, &challenge, &exp, &rawVerify); err != nil {
 		return result, err
 	}
+	verifyMode := db.EffectiveCTFVerifyMode(rawVerify, description, goal)
 	m, err := (artifacts.Store{Root: s.Root}).Inputs(task, 0)
 	if err != nil {
 		return result, err
@@ -202,16 +203,16 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 		return result, err
 	}
 
-	const wpGeneratorVersion = "v0.8.0-clean-wp"
+	const wpGeneratorVersion = "v0.8.1-verify-mode"
 	source := struct {
-		GeneratorVersion                           string
-		Task                                       int64
-		Name, Description, Goal, Status, Challenge string
-		Manifest                                   artifacts.Manifest
-		Executions                                 []db.CTFExecution
-		Candidates                                 []db.CTFCandidate
-		Facts                                      []wpFact
-	}{wpGeneratorVersion, task, name, description, goal, status, challenge, m, executions, candidates, facts}
+		GeneratorVersion                                       string
+		Task                                                   int64
+		Name, Description, Goal, Status, Challenge, VerifyMode string
+		Manifest                                               artifacts.Manifest
+		Executions                                             []db.CTFExecution
+		Candidates                                             []db.CTFCandidate
+		Facts                                                  []wpFact
+	}{wpGeneratorVersion, task, name, description, goal, status, challenge, verifyMode, m, executions, candidates, facts}
 	raw, _ := json.Marshal(source)
 	revision := SHA(raw)
 	dir := filepath.Join(s.Root, "tasks", fmt.Sprint(task), "deliverables", "wp")
@@ -230,7 +231,7 @@ func (s *Service) generateRawWPUnlocked(ctx context.Context, task int64) (WP, er
 
 	acceptedCands, confirmedCand, latestCand, winningExecID := classifyWPCandidates(candidates, Hash(m))
 	primaryScript, scriptData := s.findPrimaryScript(task, executions, winningExecID)
-	markdown := renderStandardChineseWP(name, description, goal, challenge, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+	markdown := renderStandardChineseWP(name, description, goal, challenge, verifyMode, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
 
 	result = WP{Revision: revision, Markdown: markdown, SHA256: SHA([]byte(markdown)), GeneratedAt: time.Now().UTC()}
 	if err = os.MkdirAll(dir, 0700); err != nil {
@@ -323,7 +324,7 @@ func (s *Service) findPrimaryScript(task int64, executions []db.CTFExecution, wi
 	return nil, nil
 }
 
-func pickEssentialSteps(executions []db.CTFExecution, winningExecID string, maxSteps int) []effectiveStep {
+func pickEssentialSteps(executions []db.CTFExecution, winningExecID string, maxSteps int, verifyMode string) []effectiveStep {
 	if maxSteps <= 0 {
 		maxSteps = 4
 	}
@@ -404,7 +405,11 @@ func pickEssentialSteps(executions []db.CTFExecution, winningExecID string, maxS
 	for _, e := range picked {
 		summary := summarizeCommand(e.Command)
 		if e.ID == winningExecID {
-			summary = "运行核心求解脚本提取 Flag"
+			if verifyMode == db.CTFVerifyExploitProof {
+				summary = "执行核心利用链并验证目标状态"
+			} else {
+				summary = "运行核心求解脚本获取答案"
+			}
 		}
 		steps = append(steps, effectiveStep{
 			ExecutionID: e.ID,
@@ -418,7 +423,7 @@ func pickEssentialSteps(executions []db.CTFExecution, winningExecID string, maxS
 }
 
 func renderStandardChineseWP(
-	name, description, goal, challenge string,
+	name, description, goal, challenge, verifyMode string,
 	manifest artifacts.Manifest,
 	facts []wpFact,
 	executions []db.CTFExecution,
@@ -444,13 +449,28 @@ func renderStandardChineseWP(
 		challengeLabel = "CTF 综合"
 	}
 
+	isExploitOnly := verifyMode == db.CTFVerifyExploitProof
+	isComposite := verifyMode == db.CTFVerifyFlagAndExploit
 	statusSummary := "分析探索中（暂未捕获候选 Flag）"
+	if isExploitOnly {
+		statusSummary = "分析利用中（暂未提交漏洞利用证明）"
+	} else if isComposite {
+		statusSummary = "多阶段推进中（需完成 Flag 与漏洞利用证明）"
+	}
 	if len(acceptedCands) > 1 {
-		statusSummary = fmt.Sprintf("已验证确认 %d 个 Flag", len(acceptedCands))
+		statusSummary = fmt.Sprintf("已验证确认 %d 项验收结果", len(acceptedCands))
 	} else if confirmedCand != nil {
-		statusSummary = fmt.Sprintf("已验证通过（`%s`）", confirmedCand.Value)
+		if confirmedCand.Kind == db.CTFCandidateExploitProof {
+			statusSummary = fmt.Sprintf("平台已验证漏洞利用通过（%s）", confirmedCand.Value)
+		} else {
+			statusSummary = fmt.Sprintf("已验证通过（`%s`）", confirmedCand.Value)
+		}
 	} else if latestCand != nil {
-		statusSummary = fmt.Sprintf("待人工确认（候选 `%s`）", latestCand.Value)
+		if latestCand.Kind == db.CTFCandidateExploitProof {
+			statusSummary = fmt.Sprintf("待平台验证利用效果（%s）", latestCand.Value)
+		} else {
+			statusSummary = fmt.Sprintf("待人工确认（候选 `%s`）", latestCand.Value)
+		}
 	}
 
 	fmt.Fprintf(&b, "# Write-up — %s\n\n", title)
@@ -478,7 +498,7 @@ func renderStandardChineseWP(
 
 	// 二、解题思路
 	b.WriteString("## 二、解题思路\n\n")
-	b.WriteString(generateOverviewText(challenge, name, description, len(manifest.Files), primaryScript, statusSummary))
+	b.WriteString(generateOverviewText(challenge, name, description, verifyMode, len(manifest.Files), primaryScript, statusSummary))
 	b.WriteString("\n\n")
 	if usefulFacts := extractUsefulFacts(facts); len(usefulFacts) > 0 {
 		b.WriteString("**关键分析发现**：\n")
@@ -490,14 +510,18 @@ func renderStandardChineseWP(
 
 	// 三、关键步骤
 	b.WriteString("## 三、关键步骤\n\n")
-	steps := pickEssentialSteps(executions, winningExecID, 4)
+	steps := pickEssentialSteps(executions, winningExecID, 4, verifyMode)
 	if len(steps) == 0 {
 		b.WriteString("暂未记录可复现的关键命令步骤。\n\n")
 	} else {
 		for idx, st := range steps {
 			tag := ""
 			if st.IsWinner {
-				tag = "（命中 Flag）"
+				if isExploitOnly || (confirmedCand != nil && confirmedCand.Kind == db.CTFCandidateExploitProof) {
+					tag = "（命中关键利用）"
+				} else {
+					tag = "（命中 Flag）"
+				}
 			}
 			fmt.Fprintf(&b, "### %d. %s%s\n\n", idx+1, st.Summary, tag)
 			b.WriteString(fence(strings.TrimSpace(st.Command), "bash"))
@@ -533,27 +557,58 @@ func renderStandardChineseWP(
 		}
 	}
 
-	// 五、获取 Flag
-	b.WriteString("## 五、获取 Flag\n\n")
+	// 五、验收结果 / 获取 Flag
+	if isExploitOnly {
+		b.WriteString("## 五、漏洞利用验证结果\n\n")
+	} else if isComposite {
+		b.WriteString("## 五、验收结果（Flag 与漏洞利用证明）\n\n")
+	} else {
+		b.WriteString("## 五、获取 Flag\n\n")
+	}
 	if len(acceptedCands) > 1 {
-		fmt.Fprintf(&b, "本题共确认 **%d 个有效 Flag**：\n\n", len(acceptedCands))
-		b.WriteString("| 序号 | 场景 / 备注 | Flag |\n| :---: | :--- | :--- |\n")
+		allFlags := !isExploitOnly && !isComposite
+		for _, cand := range acceptedCands {
+			if cand.Kind == db.CTFCandidateExploitProof {
+				allFlags = false
+				break
+			}
+		}
+		if allFlags {
+			fmt.Fprintf(&b, "本题共确认 **%d 个有效 Flag**：\n\n", len(acceptedCands))
+		} else {
+			fmt.Fprintf(&b, "本题共确认 **%d 项验收结果**：\n\n", len(acceptedCands))
+		}
+		b.WriteString("| 序号 | 类型 | 场景 / 备注 | 结果 |\n| :---: | :--- | :--- | :--- |\n")
 		for idx, ac := range acceptedCands {
+			kindLabel := "Flag"
+			if ac.Kind == db.CTFCandidateExploitProof {
+				kindLabel = "漏洞利用证明"
+			}
 			note := strings.TrimSpace(ac.Notes)
 			if note == "" {
-				note = fmt.Sprintf("Flag %d", idx+1)
+				note = fmt.Sprintf("阶段 %d", idx+1)
 			}
-			fmt.Fprintf(&b, "| %d | %s | `%s` |\n", idx+1, strings.ReplaceAll(note, "|", "-"), ac.Value)
+			fmt.Fprintf(&b, "| %d | %s | %s | `%s` |\n", idx+1, kindLabel, strings.ReplaceAll(note, "|", "-"), strings.ReplaceAll(ac.Value, "|", "-"))
 		}
 		b.WriteString("\n")
 	} else if confirmedCand != nil {
-		fmt.Fprintf(&b, "- **最终 Flag**：`%s`\n", confirmedCand.Value)
+		if confirmedCand.Kind == db.CTFCandidateExploitProof {
+			fmt.Fprintf(&b, "- **利用证明**：%s\n", confirmedCand.Value)
+		} else {
+			fmt.Fprintf(&b, "- **最终 Flag**：`%s`\n", confirmedCand.Value)
+		}
 		if strings.TrimSpace(confirmedCand.Notes) != "" {
 			fmt.Fprintf(&b, "- **验证说明**：%s\n", strings.TrimSpace(confirmedCand.Notes))
 		}
 		b.WriteString("\n")
 	} else if latestCand != nil {
-		fmt.Fprintf(&b, "- **候选 Flag**：`%s`（待平台核验）\n\n", latestCand.Value)
+		if latestCand.Kind == db.CTFCandidateExploitProof {
+			fmt.Fprintf(&b, "- **待验证利用证明**：%s（请在赛题平台验证并确认）\n\n", latestCand.Value)
+		} else {
+			fmt.Fprintf(&b, "- **候选 Flag**：`%s`（待平台核验）\n\n", latestCand.Value)
+		}
+	} else if isExploitOnly {
+		b.WriteString("尚未确认漏洞利用证明；请确认平台「验证漏洞利用」结果后点击完成任务。\n\n")
 	} else {
 		b.WriteString("尚未获取最终 Flag。\n\n")
 	}
@@ -561,26 +616,32 @@ func renderStandardChineseWP(
 	return b.String()
 }
 
-func generateOverviewText(challenge, name, description string, fileCount int, script *Script, flagVal string) string {
+func generateOverviewText(challenge, name, description, verifyMode string, fileCount int, script *Script, flagVal string) string {
 	c := strings.ToLower(strings.TrimSpace(challenge))
+	suffix := "并还原出正确 Flag"
+	if verifyMode == db.CTFVerifyExploitProof {
+		suffix = "并完成平台漏洞利用效果验证"
+	} else if verifyMode == db.CTFVerifyFlagAndExploit {
+		suffix = "并依次完成 Flag 获取与平台漏洞利用验证"
+	}
 	switch {
 	case c == "pwn" || strings.Contains(strings.ToLower(name), "pwn"):
-		return "本题属于 **Pwn（二进制漏洞利用）** 赛题。整体解题思路如下：首先对目标二进制文件的保护机制（Canary / NX / PIE / RELRO）进行审查，结合静态逆向分析定位输入缓冲区溢出或格式化字符串漏洞原语；随后根据目标保护与运行环境构造精准的溢出偏移与 ROP 链（或 ret2libc 泄露基址），最后运行本地/远程利用脚本直接获取权限并读取最终 Flag。"
+		return "本题属于 **Pwn（二进制漏洞利用）** 赛题。整体解题思路如下：首先对目标二进制文件的保护机制（Canary / NX / PIE / RELRO）进行审查，结合静态逆向分析定位输入缓冲区溢出或格式化字符串漏洞原语；随后根据目标保护与运行环境构造精准的溢出偏移与 ROP 链（或 ret2libc 泄露基址），最后运行本地/远程利用脚本获取目标状态" + suffix + "。"
 	case c == "reverse" || strings.Contains(strings.ToLower(name), "reverse") || strings.Contains(strings.ToLower(name), "re"):
-		return "本题属于 **Reverse（逆向工程）** 赛题。整体解题思路如下：首先排查目标二进制架构与壳机制（UPX 脱壳），定位主校验函数与加密变换逻辑；针对复杂的数据变换、线性变换或矩阵约束，利用 Z3 约束求解器或反向逆算法快速推导满足条件的原始输入，最终成功还原题目所需的真实 Flag。"
+		return "本题属于 **Reverse（逆向工程）** 赛题。整体解题思路如下：首先排查目标二进制架构与壳机制（UPX 脱壳），定位主校验函数与加密变换逻辑；针对复杂的数据变换、线性变换或矩阵约束，利用 Z3 约束求解器或反向逆算法快速推导满足条件的原始输入，" + suffix + "。"
 	case c == "crypto" || strings.Contains(strings.ToLower(name), "crypto") || strings.Contains(strings.ToLower(name), "rsa"):
-		return "本题属于 **Crypto（密码学）** 赛题。整体解题思路如下：首先分析题目给出的公钥参数、密文格式与加密逻辑，快速识别其存在的经典攻击向量（如 RSA 低加密指数、因数分解弱点、同余方程组或共模攻击）；随后调用高精度数论库编写 Python 脚本反求明文，直接还原出目标 Flag。"
+		return "本题属于 **Crypto（密码学）** 赛题。整体解题思路如下：首先分析题目给出的公钥参数、密文格式与加密逻辑，快速识别其存在的经典攻击向量（如 RSA 低加密指数、因数分解弱点、同余方程组或共模攻击）；随后调用高精度数论库编写 Python 脚本反求目标明文/凭据，" + suffix + "。"
 	case c == "misc" || strings.Contains(strings.ToLower(name), "misc") || strings.Contains(strings.ToLower(name), "look"):
-		return "本题属于 **Misc（杂项安全 / 电子取证）** 赛题。整体解题思路如下：首先通过真实文件魔数排查目标文件的本质属性，识别并分离内嵌的隐藏文件、修复伪加密或解析隐写图层；随后编写针对性脚本精准提取深层隐匿数据，顺利还原出符合格式规范的 Flag。"
+		return "本题属于 **Misc（杂项安全 / 电子取证）** 赛题。整体解题思路如下：首先通过真实文件魔数排查目标文件的本质属性，识别并分离内嵌的隐藏文件、修复伪加密或解析隐写图层；随后编写针对性脚本精准提取深层隐匿数据，" + suffix + "。"
 	case c == "web" || strings.Contains(strings.ToLower(name), "web"):
-		return "本题属于 **Web（Web 安全）** 赛题。整体解题思路如下：首先对题目接口进行轻量化资产探测与源码特性审计，快速锁定注入点、伪协议、身份伪造或反序列化攻击链；随后构造针对性 Payload 触发目标漏洞，成功从响应回显或服务端环境中读取并提取出 Flag。"
+		return "本题属于 **Web（Web 安全）** 赛题。整体解题思路如下：首先对题目接口进行轻量化资产探测与源码特性审计，快速锁定注入点、越权控制、文件写入或反序列化等攻击链；随后构造针对性 Payload 触发目标漏洞，" + suffix + "。"
 	default:
-		return "本题解题过程遵循「特征定性 → 关键分析 → 自动化求解 → 提取验证」的标准竞赛链路：首先对题目附件与目标环境完成静态特征审查，排查并定位核心逻辑断点；随后编写轻量级专精 PoC 脚本直击求解核心，最终在沙箱执行环境中稳定还原出正确 Flag 并完成验证。"
+		return "本题解题过程遵循「特征定性 → 关键分析 → 自动化利用 → 效果验证」的标准竞赛链路：首先对题目附件与目标环境完成静态特征审查，排查并定位核心漏洞点；随后编写轻量级专精 PoC 脚本直击求解核心，" + suffix + "。"
 	}
 }
 
 func (s *Service) generateDeterministicOptimizedWP(
-	name, description, goal, challenge string,
+	name, description, goal, challenge, verifyMode string,
 	manifest artifacts.Manifest,
 	facts []wpFact,
 	executions []db.CTFExecution,
@@ -592,7 +653,7 @@ func (s *Service) generateDeterministicOptimizedWP(
 	scriptData []byte,
 ) string {
 	return renderStandardChineseWP(
-		name, description, goal, challenge,
+		name, description, goal, challenge, verifyMode,
 		manifest, facts, executions,
 		acceptedCands, confirmedCand, latestCand,
 		winningExecID, primaryScript, scriptData,
@@ -602,7 +663,7 @@ func (s *Service) generateDeterministicOptimizedWP(
 func (s *Service) llmOptimizeWP(
 	ctx context.Context,
 	prov llm.Provider,
-	name, description, goal, challenge string,
+	name, description, goal, challenge, verifyMode string,
 	manifest artifacts.Manifest,
 	facts []wpFact,
 	executions []db.CTFExecution,
@@ -617,31 +678,37 @@ func (s *Service) llmOptimizeWP(
 		return ""
 	}
 
+	section5Rule := "（若只有一个 Flag 直接给出；若存在多个已确认 Flag 或复合验收结果，使用简洁的 Markdown 表格列出全部场景备注、类型与结果）"
+	if verifyMode == db.CTFVerifyExploitProof {
+		section5Rule = "（列出已在赛题平台裁判机验证通过的漏洞利用效果、验证方式与确认说明，严禁编造不存在的 flag{...}）"
+	} else if verifyMode == db.CTFVerifyFlagAndExploit {
+		section5Rule = "（依次列出第 1 阶段已确认 Flag 与第 2 阶段平台漏洞利用验证结果，使用表格或列表清晰呈现）"
+	}
 	systemPrompt := `你是一名国内顶级 CTF 战队队长与安全研究员。请根据提供的赛题信息、关键分析结论（Facts）、核心命令与求解脚本，整理出一份符合国内标准竞赛风格、重点突出、简洁易读的中文 Write-up。
 
 【强制结构】（严格使用以下 5 个二级标题，不要增删主结构）：
 # Write-up — <题目名称>
 ## 一、题目信息
-（简要列出题目名称、类别、附件/环境信息与核心考察点）
+（简要列出题目名称、类别、验收方式、附件/环境信息与核心考察点）
 ## 二、解题思路
 （先用一段话概括整体解法与突破口，再用 2~4 条简洁的中文要点讲清楚分析推理逻辑）
 ## 三、关键步骤
 （只保留 2~4 个真正推进解题的最小关键动作：每步用一句中文小标题 + 核心命令或关键发现说明）
 ## 四、核心 PoC / 利用脚本
-（完整贴出最终用于获取 Flag 的 PoC 脚本源码或一键复现命令，不要截断或省略核心逻辑）
-## 五、获取 Flag
-（若只有一个 Flag 直接给出；若存在多个已确认 Flag，使用简洁的 Markdown 表格列出全部场景备注与 Flag）
+（完整贴出最终用于解题利用的 PoC 脚本源码或一键复现命令，不要截断或省略核心逻辑）
+## 五、验证结果与 Flag
+` + section5Rule + `
 
 【严格禁忌】：
 1. 绝对禁止输出 <details>、<summary> 等 HTML 标签，也禁止输出 > [!TIP]、> [!NOTE]、> [!IMPORTANT] 等 GitHub Alert 语法。
 2. 绝对禁止出现任何 UUID / execution_id / intent_id、SHA-256 哈希值、RFC3339 时间戳或退出码审计流水账。
 3. 彻底过滤所有 ls/pwd/which 等目录探测和失败试错记录。
-4. 严禁捏造未实际出现的命令、文件或 Flag，必须原样保留真实捕获的 Flag 与核心源码。
+4. 严禁捏造未实际出现的命令、文件或 Flag，若本题无需 Flag（exploit_proof）严禁虚构 flag{...} 字符串。
 5. 直接输出纯 Markdown 文本，不要最外层代码块包裹。`
 
 	flagVal := "待验证"
 	if len(acceptedCands) > 1 {
-		flagVal = fmt.Sprintf("累计 %d 个已确认 Flag", len(acceptedCands))
+		flagVal = fmt.Sprintf("累计 %d 项已确认验收结果", len(acceptedCands))
 	} else if confirmedCand != nil {
 		flagVal = confirmedCand.Value
 	} else if latestCand != nil {
@@ -685,33 +752,38 @@ func (s *Service) llmOptimizeWP(
 
 	multiFlagSection := ""
 	if len(acceptedCands) > 1 {
-		multiFlagSection = fmt.Sprintf("【已确认有效 Flag 清单（共 %d 个）】：\n", len(acceptedCands))
+		multiFlagSection = fmt.Sprintf("【已确认验收清单（共 %d 项）】：\n", len(acceptedCands))
 		for i, ac := range acceptedCands {
+			kindLabel := "Flag"
+			if ac.Kind == db.CTFCandidateExploitProof {
+				kindLabel = "漏洞利用证明"
+			}
 			note := strings.TrimSpace(ac.Notes)
 			if note == "" {
-				note = fmt.Sprintf("Flag %d", i+1)
+				note = fmt.Sprintf("阶段 %d", i+1)
 			}
-			multiFlagSection += fmt.Sprintf("- [%d] 场景/备注：%s | Flag：%s\n", i+1, note, ac.Value)
+			multiFlagSection += fmt.Sprintf("- [%d] 类型：%s | 场景/备注：%s | 结果：%s\n", i+1, kindLabel, note, ac.Value)
 		}
-		multiFlagSection += "\n请在「五、获取 Flag」章节中用表格完整列出这些 Flag 与场景备注。\n\n"
+		multiFlagSection += "\n请在「五、验证结果与 Flag」章节中用表格完整列出这些验收结果与场景备注。\n\n"
 	}
 
 	userContent := fmt.Sprintf(`【赛题名称】：%s
 【赛题类别】：%s
+【验收方式】：%s
 【题目附件】：%s
 【题目描述】：%s
 【交付目标】：%s
-【最终 Flag】：%s
+【最终结果 / Flag】：%s
 %s【关键分析结论（Facts）】：
 %s
-【命中 Flag 的关键命令】：
+【核心求解/利用命令】：
 %s
 【关键回显输出】：
 %s
 【核心求解 PoC / Exploit 脚本】：
 %s
 【精选关键命令历史】：
-%s`, name, challenge, strings.Join(attachmentList, "、"), description, goal, flagVal, multiFlagSection, factsSection, winningCmd, winningOutput, pocCode, strings.Join(usefulCmds, "\n"))
+%s`, name, challenge, verifyMode, strings.Join(attachmentList, "、"), description, goal, flagVal, multiFlagSection, factsSection, winningCmd, winningOutput, pocCode, strings.Join(usefulCmds, "\n"))
 
 	llmCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -750,11 +822,12 @@ func (s *Service) GenerateOptimizedWP(ctx context.Context, task int64, prov llm.
 	if err := s.Sync(ctx, task); err != nil {
 		return result, err
 	}
-	var name, description, goal, status, challenge string
+	var name, description, goal, status, challenge, rawVerify string
 	var exp int64
-	if err := s.DB.QueryRowContext(ctx, `SELECT name,description,goal,status,challenge_type,exploration_id FROM tasks WHERE id=$1 AND mode='ctf' AND deleted_at IS NULL`, task).Scan(&name, &description, &goal, &status, &challenge, &exp); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT name,description,goal,status,challenge_type,exploration_id,COALESCE(ctf_verify_mode,'') FROM tasks WHERE id=$1 AND mode='ctf' AND deleted_at IS NULL`, task).Scan(&name, &description, &goal, &status, &challenge, &exp, &rawVerify); err != nil {
 		return result, err
 	}
+	verifyMode := db.EffectiveCTFVerifyMode(rawVerify, description, goal)
 	m, err := (artifacts.Store{Root: s.Root}).Inputs(task, 0)
 	if err != nil {
 		return result, err
@@ -774,10 +847,10 @@ func (s *Service) GenerateOptimizedWP(ctx context.Context, task int64, prov llm.
 
 	optimizedMarkdown := ""
 	if prov != nil {
-		optimizedMarkdown = s.llmOptimizeWP(ctx, prov, name, description, goal, challenge, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+		optimizedMarkdown = s.llmOptimizeWP(ctx, prov, name, description, goal, challenge, verifyMode, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
 	}
 	if strings.TrimSpace(optimizedMarkdown) == "" {
-		optimizedMarkdown = s.generateDeterministicOptimizedWP(name, description, goal, challenge, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
+		optimizedMarkdown = s.generateDeterministicOptimizedWP(name, description, goal, challenge, verifyMode, m, facts, executions, acceptedCands, confirmedCand, latestCand, winningExecID, primaryScript, scriptData)
 	}
 
 	revision := "opt-v2-" + SHA([]byte(optimizedMarkdown))[:16]

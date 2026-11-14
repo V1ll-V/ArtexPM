@@ -32,6 +32,7 @@ import (
 type Task struct {
 	Mode              string `json:"mode"`
 	ChallengeType     string `json:"challenge_type,omitempty"`
+	CTFVerifyMode     string `json:"ctf_verify_mode,omitempty"`
 	AttachmentBatchID string `json:"attachment_batch_id,omitempty"`
 	CTFVPNEnabled     bool   `json:"ctf_vpn_enabled,omitempty"`
 	CTFVPNFilename    string `json:"ctf_vpn_filename,omitempty"`
@@ -101,6 +102,7 @@ type taskLifecycleState struct {
 	CompanyIDs     []int64
 	CategoryID     *int64
 	CategoryName   string
+	CTFVerifyMode  string
 	CTFVPNEnabled  bool
 	CTFVPNFilename string
 	CTFVPNHash     string
@@ -117,20 +119,21 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
-		Name:          t.Name,
-		PinnedAt:      t.PinnedAt,
-		Status:        t.Status,
-		Paused:        t.Paused,
-		Queued:        t.Queued,
-		QueuedAt:      t.QueuedAt,
-		QueueMode:     t.QueueMode,
-		CompletedAt:   t.CompletedAt,
-		FirstRunAt:    t.FirstRunAt,
-		DeadlineAt:    t.DeadlineAt,
+		Name:           t.Name,
+		PinnedAt:       t.PinnedAt,
+		Status:         t.Status,
+		Paused:         t.Paused,
+		Queued:         t.Queued,
+		QueuedAt:       t.QueuedAt,
+		QueueMode:      t.QueueMode,
+		CompletedAt:    t.CompletedAt,
+		FirstRunAt:     t.FirstRunAt,
+		DeadlineAt:     t.DeadlineAt,
 		SourceTaskIDs:  append([]int64(nil), t.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), t.CompanyIDs...),
 		CategoryID:     cloneInt64Ptr(t.CategoryID),
 		CategoryName:   t.CategoryName,
+		CTFVerifyMode:  t.CTFVerifyMode,
 		CTFVPNEnabled:  t.CTFVPNEnabled,
 		CTFVPNFilename: t.CTFVPNFilename,
 		CTFVPNHash:     t.CTFVPNHash,
@@ -158,6 +161,7 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.CompanyIDs = append(t.CompanyIDs[:0], state.CompanyIDs...)
 	t.CategoryID = cloneInt64Ptr(state.CategoryID)
 	t.CategoryName = state.CategoryName
+	t.CTFVerifyMode = state.CTFVerifyMode
 	t.CTFVPNEnabled = state.CTFVPNEnabled
 	t.CTFVPNFilename = state.CTFVPNFilename
 	t.CTFVPNHash = state.CTFVPNHash
@@ -848,7 +852,7 @@ func unixNanoOrZero(t *time.Time) int64 {
 
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
-		Mode: pt.Mode, ChallengeType: pt.ChallengeType, AttachmentBatchID: pt.AttachmentBatchID,
+		Mode: pt.Mode, ChallengeType: pt.ChallengeType, CTFVerifyMode: pt.CTFVerifyMode, AttachmentBatchID: pt.AttachmentBatchID,
 		CTFVPNEnabled: pt.CTFVPNHash != "", CTFVPNFilename: pt.CTFVPNFilename, CTFVPNHash: pt.CTFVPNHash,
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Name:       pt.Name,

@@ -10,7 +10,7 @@ import (
 )
 
 func TestCTFFileToolsRejectApplicationPaths(t *testing.T) {
-	for _, tool := range ctfTools(nil, 1, 1) {
+	for _, tool := range ctfTools(nil, 1, 1, "") {
 		if tool.Name() != "Read" && tool.Name() != "Write" && tool.Name() != "LS" {
 			continue
 		}
@@ -39,7 +39,7 @@ func TestCTFAssemblyCannotAcquireHostShell(t *testing.T) {
 		return append(base, readTool("shell_open", "host shell", obj(nil), nil))
 	}
 	ctx := context.WithValue(t.Context(), ctfRunKey{}, true)
-	base := ctfTools(nil, 1, 1)
+	base := ctfTools(nil, 1, 1, "")
 	tools, _, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 	if called {

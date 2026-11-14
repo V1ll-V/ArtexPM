@@ -3,12 +3,15 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/ctf"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/ctf"
 )
 
 func (s *Server) ctfService() *ctf.Service { return ctf.New(s.m.dir, s.m.pg) }
@@ -159,6 +162,75 @@ func (s *Server) decideCTFFlag(w http.ResponseWriter, r *http.Request) {
 	}
 	t.Notify()
 	writeJSON(w, 200, c)
+}
+
+func (s *Server) ctfSetVerifyMode(w http.ResponseWriter, r *http.Request) {
+	t, done, ok := s.ctfTask(w, r)
+	if !ok {
+		return
+	}
+	defer done()
+	var in struct {
+		VerifyMode string `json:"verify_mode"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
+		writeErr(w, 400, "请求无效")
+		return
+	}
+	resolved, err := s.m.SetCTFVerifyMode(r.Context(), t, in.VerifyMode)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	t.Notify()
+	writeJSON(w, 200, map[string]any{"verify_mode": resolved})
+}
+
+func (s *Server) ctfCompleteExploit(w http.ResponseWriter, r *http.Request) {
+	t, done, ok := s.ctfTask(w, r)
+	if !ok {
+		return
+	}
+	defer done()
+	task, _ := strconv.ParseInt(t.ID, 10, 64)
+	var in struct {
+		ExecutionID  string `json:"execution_id"`
+		ProofSummary string `json:"proof_summary"`
+		Notes        string `json:"notes"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, 400, "请求无效")
+			return
+		}
+	}
+	svc := s.ctfService()
+	if err := svc.Sync(r.Context(), task); err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	cand, err := s.m.CompleteCTFExploitProof(r.Context(), t, in.ExecutionID, in.ProofSummary, in.Notes)
+	if err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	canOptimize := s.engine != nil && s.engine.ReadyFor(t)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if canOptimize {
+			prov := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "mainagent"}
+			if _, optErr := svc.GenerateOptimizedWP(ctx, task, prov); optErr == nil {
+				return
+			}
+		}
+		_, _ = svc.GenerateWP(ctx, task)
+	}()
+	if t.lifecycleSnapshot().Status == "done" {
+		s.engine.cancelExec(t.ID, agent.AbortGoalMet)
+	}
+	t.Notify()
+	writeJSON(w, 200, map[string]any{"ok": true, "candidate": cand})
 }
 func (s *Server) ctfExecutionLog(w http.ResponseWriter, r *http.Request) {
 	t, done, ok := s.ctfTask(w, r)

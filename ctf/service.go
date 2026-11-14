@@ -120,6 +120,13 @@ func (s *Service) prepareSession(ctx context.Context, task, intent int64) (strin
 	return key, session, m, work, nil
 }
 
+func pendingCTFWaitError(pending *db.CTFCandidate) error {
+	if pending.Kind == db.CTFCandidateExploitProof {
+		return fmt.Errorf("已有漏洞利用证明等待用户在平台验证（候选 #%d）；自动探测已停止，请等待用户在赛题平台验证并确认结果", pending.ID)
+	}
+	return fmt.Errorf("已有候选 Flag 等待用户提交验证（候选 #%d）；自动探测已停止，请先在答案与验证中确认或否定", pending.ID)
+}
+
 func (s *Service) Execute(ctx context.Context, task, intent int64, command string, timeout int) (*db.CTFExecution, error) {
 	sessionIntent, _, lockKey, _ := s.resolveScope(ctx, task, intent)
 	unlock := executionLock(lockKey)
@@ -130,7 +137,7 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 	if pending, err := s.DB.PendingCTFSubmission(ctx, task); err != nil {
 		return nil, err
 	} else if pending != nil {
-		return nil, fmt.Errorf("已有候选 Flag 等待用户提交验证（候选 #%d）；自动探测已停止，请先在答案与验证中确认或否定", pending.ID)
+		return nil, pendingCTFWaitError(pending)
 	}
 	key, session, m, work, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
@@ -205,12 +212,14 @@ func (s *Service) Execute(ctx context.Context, task, intent int64, command strin
 	if err = s.DB.SaveCTFExecution(saveCtx, e); err != nil {
 		return nil, err
 	}
-	for _, flag := range ExtractFlags(string(result.Stdout)+"\n"+string(result.Stderr), 32) {
-		if IsSelfConstructedMockFlag(command, flag) {
-			continue
-		}
-		if _, err = s.DB.AddCTFOutputCandidate(saveCtx, task, e.ID, flag); err != nil {
-			return nil, err
+	if verifyMode, _ := s.DB.TaskCTFVerifyMode(saveCtx, task); verifyMode != db.CTFVerifyExploitProof {
+		for _, flag := range ExtractFlags(string(result.Stdout)+"\n"+string(result.Stderr), 32) {
+			if IsSelfConstructedMockFlag(command, flag) {
+				continue
+			}
+			if _, err = s.DB.AddCTFOutputCandidate(saveCtx, task, e.ID, flag); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return e, nil
@@ -226,7 +235,7 @@ func (s *Service) StartJob(ctx context.Context, task, intent int64, command, job
 	if pending, err := s.DB.PendingCTFSubmission(ctx, task); err != nil {
 		return nil, err
 	} else if pending != nil {
-		return nil, fmt.Errorf("已有候选 Flag 等待用户提交验证（候选 #%d）；自动探测已停止，请先在答案与验证中确认或否定", pending.ID)
+		return nil, pendingCTFWaitError(pending)
 	}
 	key, session, m, work, err := s.prepareSession(ctx, task, intent)
 	if err != nil {
@@ -284,13 +293,15 @@ func (s *Service) JobStatus(ctx context.Context, task, intent int64, jobID strin
 	if err != nil {
 		return nil, err
 	}
-	combined := status.Stdout + "\n" + status.Stderr
-	for _, flag := range ExtractFlags(combined, 16) {
-		execID := status.ExecID
-		if execID == "" {
-			execID = status.ID
+	if verifyMode, _ := s.DB.TaskCTFVerifyMode(ctx, task); verifyMode != db.CTFVerifyExploitProof {
+		combined := status.Stdout + "\n" + status.Stderr
+		for _, flag := range ExtractFlags(combined, 16) {
+			execID := status.ExecID
+			if execID == "" {
+				execID = status.ID
+			}
+			_, _ = s.DB.AddCTFOutputCandidate(ctx, task, execID, flag)
 		}
-		_, _ = s.DB.AddCTFOutputCandidate(ctx, task, execID, flag)
 	}
 	return status, nil
 }
@@ -357,12 +368,14 @@ func (s *Service) ReadInteractive(ctx context.Context, task, intent int64, sid s
 		return nil, err
 	}
 	if res.Output != "" {
-		execID := res.ExecID
-		if execID == "" {
-			execID = sid
-		}
-		for _, flag := range ExtractFlags(res.Output, 16) {
-			_, _ = s.DB.AddCTFOutputCandidate(ctx, task, execID, flag)
+		if verifyMode, _ := s.DB.TaskCTFVerifyMode(ctx, task); verifyMode != db.CTFVerifyExploitProof {
+			execID := res.ExecID
+			if execID == "" {
+				execID = sid
+			}
+			for _, flag := range ExtractFlags(res.Output, 16) {
+				_, _ = s.DB.AddCTFOutputCandidate(ctx, task, execID, flag)
+			}
 		}
 	}
 	return res, nil
@@ -811,4 +824,37 @@ func (s *Service) Submit(ctx context.Context, task int64, exec, value string) (i
 		return 0, errors.New("候选答案必须出现在本任务该次执行的真实输出中")
 	}
 	return s.DB.AddCTFCandidate(ctx, task, exec, value)
+}
+
+// SubmitExploitProof records a non-flag exploit proof candidate backed by a real
+// container execution for exploit_proof or flag_and_exploit CTF tasks.
+func (s *Service) SubmitExploitProof(ctx context.Context, task int64, exec, proofSummary, targetEffect string) (int64, error) {
+	verifyMode, err := s.DB.TaskCTFVerifyMode(ctx, task)
+	if err != nil {
+		return 0, err
+	}
+	if verifyMode != db.CTFVerifyExploitProof && verifyMode != db.CTFVerifyFlagAndExploit {
+		return 0, errors.New("当前任务验收模式为「仅提交 Flag」，请使用 ctf_submit_flag 提交答案，或在详情页切换验收方式")
+	}
+	proofSummary = strings.TrimSpace(proofSummary)
+	targetEffect = strings.TrimSpace(targetEffect)
+	if proofSummary == "" {
+		return 0, errors.New("proof_summary 不能为空")
+	}
+	e, err := s.DB.CTFExecution(ctx, task, exec)
+	if err != nil {
+		return 0, err
+	}
+	out, err := s.EvidenceFile(task, e.StdoutPath, e.StdoutSHA)
+	if err != nil {
+		return 0, err
+	}
+	stderr, err := s.EvidenceFile(task, e.StderrPath, e.StderrSHA)
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(string(out)) == "" && strings.TrimSpace(string(stderr)) == "" && len(e.Files) <= 2 {
+		return 0, errors.New("漏洞利用证明必须基于有真实输出或脚本产物的执行记录")
+	}
+	return s.DB.AddCTFExploitProofCandidate(ctx, task, exec, proofSummary, targetEffect)
 }

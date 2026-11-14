@@ -4,9 +4,12 @@
 export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
+export type CTFVerifyMode = "auto" | "flag" | "exploit_proof" | "flag_and_exploit";
+
 export interface Task {
   mode?: "pentest" | "ctf";
   challenge_type?: "auto" | "web" | "pwn" | "reverse" | "crypto" | "misc";
+  ctf_verify_mode?: CTFVerifyMode;
   ctf_vpn_enabled?: boolean;
   ctf_vpn_filename?: string;
   ctf_vpn_hash?: string;
@@ -1713,16 +1716,20 @@ export interface CTFExecution {
 }
 export interface CTFCandidate {
   id: number; value: string; state: "candidate" | "accepted" | "rejected" | "stale";
+  kind?: "flag" | "exploit_proof";
   execution_id: string; input_hash: string; revision: number; notes: string;
 }
 export interface CTFProgress {
   phase: "not_started" | "solving" | "awaiting_confirmation" | "confirmed" | "paused" | "stopped";
+  verify_mode?: "flag" | "exploit_proof" | "flag_and_exploit";
   task_status: TaskStatus;
   paused: boolean;
   input_hash: string;
   execution_count: number;
   pending_count: number;
   accepted_count: number;
+  accepted_flag_count?: number;
+  accepted_proof_count?: number;
   goals_total?: number;
   goals_met?: number;
   goals_open?: number;

@@ -27,32 +27,52 @@ const phases: Record<CTFProgress["phase"], string> = {
   not_started: "等待执行", solving: "正在解题", awaiting_confirmation: "等待提交验证",
   confirmed: "答案已确认", paused: "已暂停", stopped: "已停止",
 };
+const verifyModeLabels: Record<NonNullable<CTFProgress["verify_mode"]>, string> = {
+  flag: "提交 Flag",
+  exploit_proof: "漏洞利用证明（无需 Flag）",
+  flag_and_exploit: "复合验收（Flag + 漏洞利用证明）",
+};
+
 function Candidate({
   candidate: c,
   busy,
   decide,
   completed,
   isMultiGoal,
+  verifyMode,
+  proofConfirmedCount,
 }: {
   candidate: CTFCandidate;
   busy: boolean;
   completed: boolean;
   decide: (c: CTFCandidate, state: "accepted" | "rejected", notes: string, completeTask?: boolean) => Promise<void>;
   isMultiGoal?: boolean;
+  verifyMode?: CTFProgress["verify_mode"];
+  proofConfirmedCount?: number;
 }) {
   const [notes, setNotes] = React.useState(c.notes);
   React.useEffect(() => {
     setNotes(c.notes);
   }, [c.notes]);
 
+  const isProof = c.kind === "exploit_proof";
+  const needNextStageAfterFlag = !isProof && verifyMode === "flag_and_exploit" && (proofConfirmedCount ?? 0) === 0;
+
   return (
     <div className="space-y-2 rounded-md border p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <code className="break-all text-sm font-semibold">{c.value}</code>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className={isProof ? "rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs font-medium text-indigo-600 dark:text-indigo-400 border border-indigo-500/30" : "rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"}>
+            {isProof ? "漏洞利用证明" : "Flag"}
+          </span>
+          <code className="break-all text-sm font-semibold">{c.value}</code>
+        </div>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={async () => { if (await copyText(c.value)) toast.success("Flag 已复制，可提交题目平台验证"); }}>
-            <CopyIcon />复制 Flag
-          </Button>
+          {!isProof && (
+            <Button size="sm" variant="outline" onClick={async () => { if (await copyText(c.value)) toast.success("Flag 已复制，可提交题目平台验证"); }}>
+              <CopyIcon />复制 Flag
+            </Button>
+          )}
           <span className={c.state === "accepted" ? "rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 px-2 py-0.5 text-xs font-medium border border-emerald-500/30" : "text-xs text-muted-foreground"}>
             {labels[c.state]}
           </span>
@@ -65,7 +85,7 @@ function Candidate({
         <>
           <Textarea
             aria-label={`候选 ${c.id} 验证备注`}
-            placeholder="填写对应场景或复现说明（例如：场景1 首页代码泄露 / 场景2 数据库修复）"
+            placeholder={isProof ? "可补充平台验证截图说明、裁判机返回值或持久化验证细节" : "填写对应场景或复现说明（例如：阶段 1 密钥泄露 / 场景 2 提权）"}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={2}
@@ -80,7 +100,7 @@ function Candidate({
                 )}
                 {!completed && (
                   <Button size="sm" variant="outline" disabled={busy} onClick={() => decide(c, "accepted", notes, true)}>
-                    提前以此 Flag 结束整题
+                    {isProof ? "以此证明结束整题" : "提前以此 Flag 结束整题"}
                   </Button>
                 )}
                 <Button
@@ -92,14 +112,14 @@ function Candidate({
                   撤销确认
                 </Button>
               </>
-            ) : isMultiGoal ? (
+            ) : needNextStageAfterFlag ? (
               <>
                 <Button size="sm" disabled={busy || completed} onClick={() => decide(c, "accepted", notes, false)}>
                   <CheckIcon />
-                  确认此 Flag，继续剩余目标
+                  确认 Flag 正确，继续下一步（漏洞利用证明）
                 </Button>
                 <Button size="sm" variant="outline" disabled={busy || completed} onClick={() => decide(c, "accepted", notes, true)}>
-                  验证正确并结束整题
+                  直接以此完成整题
                 </Button>
                 <Button
                   size="sm"
@@ -110,11 +130,29 @@ function Candidate({
                   否定候选
                 </Button>
               </>
+            ) : isMultiGoal ? (
+              <>
+                <Button size="sm" disabled={busy || completed} onClick={() => decide(c, "accepted", notes, false)}>
+                  <CheckIcon />
+                  {isProof ? "确认通过，继续剩余目标" : "确认此 Flag，继续剩余目标"}
+                </Button>
+                <Button size="sm" variant="outline" disabled={busy || completed} onClick={() => decide(c, "accepted", notes, true)}>
+                  验证通过并结束整题
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || c.state === "rejected"}
+                  onClick={() => decide(c, "rejected", notes)}
+                >
+                  {isProof ? "验证未通过，打回重做" : "否定候选"}
+                </Button>
+              </>
             ) : (
               <>
                 <Button size="sm" disabled={busy || completed} onClick={() => decide(c, "accepted", notes, true)}>
                   <CheckIcon />
-                  {completed ? "任务已完成" : "验证正确并完成任务"}
+                  {completed ? "任务已完成" : isProof ? "平台验证通过并完成任务" : "验证正确并完成任务"}
                 </Button>
                 {!completed && (
                   <Button size="sm" variant="outline" disabled={busy} onClick={() => decide(c, "accepted", notes, false)}>
@@ -127,7 +165,7 @@ function Candidate({
                   disabled={busy || c.state === "rejected"}
                   onClick={() => decide(c, "rejected", notes)}
                 >
-                  否定候选
+                  {isProof ? "验证未通过，打回重做" : "否定候选"}
                 </Button>
               </>
             )}
@@ -145,6 +183,9 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
   const [progress, setProgress] = React.useState<CTFProgress>();
   const [busy, setBusy] = React.useState(false);
   const [optimizing, setOptimizing] = React.useState(false);
+  const [changingMode, setChangingMode] = React.useState(false);
+  const [proofSummary, setProofSummary] = React.useState("");
+  const [proofNotes, setProofNotes] = React.useState("");
   const [error, setError] = React.useState("");
   const request = React.useRef<AbortController | null>(null);
   const mutating = React.useRef<string | null>(null);
@@ -199,11 +240,60 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
     try {
       await api.decideCTFFlag(taskId, c, state, notes, completeTask);
       if (activeTask.current !== taskId) return;
-      toast.success(state === "accepted" ? completeTask ? "Flag 已确认，解题任务已完成" : "已确认 Flag，其他目标仍保留" : c.state === "accepted" ? "已撤销确认；若任务曾完成，现已重新打开并暂停，请按需继续" : "已否定候选；处理完其他候选后，未手动暂停的任务会继续解题");
+      const isProof = c.kind === "exploit_proof";
+      toast.success(
+        state === "accepted"
+          ? completeTask
+            ? isProof
+              ? "漏洞利用验证已通过，解题任务已完成"
+              : "Flag 已确认，解题任务已完成"
+            : isProof
+            ? "已确认漏洞利用通过，任务继续保持"
+            : "已确认 Flag，将继续后续阶段或保留其他目标"
+          : c.state === "accepted"
+          ? "已撤销确认；若任务曾完成，现已重新打开并暂停，请按需继续"
+          : isProof
+          ? "已打回该漏洞利用证明；未手动暂停的任务将继续尝试"
+          : "已否定候选；处理完其他候选后，未手动暂停的任务会继续解题",
+      );
       onTaskUpdated?.();
       await refresh();
     } catch (e) {
       if (activeTask.current === taskId) toast.error(e instanceof Error ? e.message : "操作失败");
+    } finally {
+      if (mutating.current === taskId) mutating.current = null;
+      if (activeTask.current === taskId) setBusy(false);
+    }
+  }
+  async function handleVerifyModeChange(next: "flag" | "exploit_proof" | "flag_and_exploit") {
+    setChangingMode(true);
+    try {
+      await api.setCTFVerifyMode(taskId, next);
+      toast.success(`验收方式已切换为「${verifyModeLabels[next]}」`);
+      onTaskUpdated?.();
+      await refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "切换验收方式失败");
+    } finally {
+      setChangingMode(false);
+    }
+  }
+  async function handleCompleteExploit() {
+    mutating.current = taskId;
+    request.current?.abort();
+    request.current = null;
+    setBusy(true);
+    try {
+      await api.completeCTFExploit(taskId, {
+        proof_summary: proofSummary.trim(),
+        notes: proofNotes.trim(),
+      });
+      if (activeTask.current !== taskId) return;
+      toast.success("已确认平台漏洞利用验证通过，任务已完成并生成 Write-up");
+      onTaskUpdated?.();
+      await refresh();
+    } catch (e) {
+      if (activeTask.current === taskId) toast.error(e instanceof Error ? e.message : "完成失败");
     } finally {
       if (mutating.current === taskId) mutating.current = null;
       if (activeTask.current === taskId) setBusy(false);
@@ -242,6 +332,16 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
       setOptimizing(false);
     }
   }
+  const verifyMode = progress?.verify_mode ?? "flag";
+  const terminal = progress?.task_status === "done" || progress?.task_status === "failed" || progress?.task_status === "timeout";
+  const latestPendingCandidate = candidates.find((c) => c.state === "candidate");
+  const hasPendingExploitProof = candidates.some((c) => c.kind === "exploit_proof" && c.state === "candidate");
+  const showDirectExploitComplete =
+    !!progress &&
+    progress.task_status !== "done" &&
+    !hasPendingExploitProof &&
+    (verifyMode === "exploit_proof" || (verifyMode === "flag_and_exploit" && (progress.accepted_flag_count ?? 0) >= 1));
+
   return (
     <div className="space-y-4">
       {progress && (
@@ -256,7 +356,23 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
                   : phases[progress.phase]}
                 {progress.paused && progress.phase !== "paused" ? " · 任务已暂停" : ""}
               </p>
-              <span className="text-xs text-muted-foreground">页面可见时每 5 秒自动更新</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <label htmlFor="ctf-verify-mode-switch" className="text-xs text-muted-foreground">
+                  验收方式
+                </label>
+                <select
+                  id="ctf-verify-mode-switch"
+                  className="h-7 rounded border bg-background px-2 text-xs"
+                  value={verifyMode}
+                  disabled={changingMode || terminal}
+                  onChange={(e) => void handleVerifyModeChange(e.target.value as "flag" | "exploit_proof" | "flag_and_exploit")}
+                >
+                  <option value="flag">提交 Flag</option>
+                  <option value="exploit_proof">漏洞利用证明（无需 Flag）</option>
+                  <option value="flag_and_exploit">复合验收（Flag + 漏洞利用）</option>
+                </select>
+                <span className="text-xs text-muted-foreground">页面可见时每 5 秒自动更新</span>
+              </div>
             </div>
             <div className={`grid ${(progress.goals_total ?? 0) > 1 ? "grid-cols-4" : "grid-cols-3"} gap-3 text-sm`}>
               {(progress.goals_total ?? 0) > 1 && (
@@ -270,20 +386,29 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
             </div>
             {progress.phase === "awaiting_confirmation" && (
               <p className="text-sm text-amber-600 dark:text-amber-400 font-medium">
-                已找到新候选 Flag，自动解题已暂停等待提交验证。核对后点击下方对应候选的确认按钮，未完成的场景将自动恢复解题。
+                {latestPendingCandidate?.kind === "exploit_proof"
+                  ? "已提交漏洞利用证明，自动解题已暂停。请前往赛题平台点击「验证漏洞利用」，核对裁判结果后在下方确认或打回重做。"
+                  : "已找到新候选 Flag，自动解题已暂停等待提交验证。核对后点击下方对应候选的确认按钮，未完成的阶段/场景将自动继续。"}
+              </p>
+            )}
+            {verifyMode === "flag_and_exploit" && (progress.accepted_flag_count ?? 0) >= 1 && (progress.accepted_proof_count ?? 0) === 0 && progress.task_status !== "done" && (
+              <p className="text-sm text-indigo-600 dark:text-indigo-400 font-medium">
+                复合验收进度：阶段 1（Flag）已确认 ✓ · 当前进入阶段 2（漏洞利用证明，无需第二个 Flag）。
               </p>
             )}
             {progress.phase === "solving" && progress.accepted_count > 0 && (progress.goals_open ?? 0) > 0 && (
               <p className="text-sm text-emerald-600 dark:text-emerald-400 font-medium">
-                已确认 {progress.accepted_count} 个 Flag。当前仍有 {progress.goals_open} 个场景/分目标正在继续自动解题中，后续发现的新 Flag 会继续在此处更新。
+                已确认 {progress.accepted_count} 项结果。当前仍有 {progress.goals_open} 个场景/分目标正在继续自动解题中，后续进展会在此处更新。
               </p>
             )}
             {progress.phase === "confirmed" && (
               <p className="text-sm text-muted-foreground">
-                {progress.task_status === "done" ? "当前 Flag 已确认，任务已结束，可下载 WP。" : "Flag 已确认。如本题全部目标已完成，点击「完成解题任务」；如仍有其他 Flag 或交付目标，可继续保留任务。"}
+                {progress.task_status === "done"
+                  ? "验收已通过，任务已结束，可下载 Write-up。"
+                  : "已有已确认结果。若全部验收步骤都已在平台通过，可结束任务；否则请继续推进下一阶段。"}
               </p>
             )}
-            {progress.phase === "stopped" && <p className="text-sm text-muted-foreground">本次执行已停止，当前输入尚无已确认答案；已有日志与阶段 WP 会保留。</p>}
+            {progress.phase === "stopped" && <p className="text-sm text-muted-foreground">本次执行已停止，当前输入尚无已确认验收结果；已有日志与阶段 WP 会保留。</p>}
             <p className="break-all font-mono text-xs text-muted-foreground">输入版本 {progress.input_hash.slice(0, 16)}</p>
           </CardContent>
         </Card>
@@ -294,10 +419,44 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            {(progress?.goals_total ?? 0) > 1
+            {verifyMode === "exploit_proof"
+              ? "本题采用「漏洞利用证明（无需 Flag）」验收：当智能体完成目标漏洞利用（或你确认在赛题平台点击「验证漏洞利用」已通过）后，确认下方证明或直接一键完成任务即可，无需找不存在的 flag{...}。"
+              : verifyMode === "flag_and_exploit"
+              ? "本题采用「复合验收（先 Flag 后漏洞利用证明）」：先确认第 1 阶段 Flag 正确并继续第 2 阶段；完成第 2 阶段漏洞利用并在平台验证通过后，再结束整题。"
+              : (progress?.goals_total ?? 0) > 1
               ? "多场景/多 Flag 题目：验证通过后请点击「确认此 Flag，继续剩余目标」，系统会自动锁定该场景 Flag 并继续攻关后续场景；仅在全部场景做完或准备收尾时才选择「结束整题」。"
               : "核对平台结果后，单题可直接「验证正确并完成任务」。多 Flag 或仍有其他交付时，选择「仅确认，保留其他目标」。完成任务会停止剩余自动意图，并将未继续执行的目标注明为放弃；旧输入候选不能确认。"}
           </p>
+          {showDirectExploitComplete && (
+            <div className="space-y-2.5 rounded-md border border-indigo-500/30 bg-indigo-500/5 p-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">
+                  {verifyMode === "flag_and_exploit" ? "阶段 2：平台漏洞利用验证收尾" : "平台漏洞利用验证通过，一键结束任务"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  若智能体已实质达成题干效果且你已在赛题平台点击「验证漏洞利用」通过，无需等待额外 Flag，可直接在此确认并生成完整 WP。
+                </p>
+              </div>
+              <Textarea
+                aria-label="漏洞利用证明摘要（可选）"
+                placeholder="可选：简要说明已达成的利用效果（默认：已在赛题平台完成漏洞利用验证），例如：已越权写入 /data/pwned_proof.txt 并保留"
+                value={proofSummary}
+                onChange={(e) => setProofSummary(e.target.value)}
+                rows={2}
+              />
+              <Textarea
+                aria-label="平台验证备注（可选）"
+                placeholder="可选：补充平台验证细节、响应截图说明或持久化确认记录"
+                value={proofNotes}
+                onChange={(e) => setProofNotes(e.target.value)}
+                rows={2}
+              />
+              <Button size="sm" disabled={busy} onClick={() => void handleCompleteExploit()}>
+                <CheckIcon />
+                确认已在平台验证通过，完成任务并生成 WP
+              </Button>
+            </div>
+          )}
           {candidates.length ? (
             candidates.map((c) => (
               <Candidate
@@ -307,11 +466,13 @@ export function CTFReportTab({ taskId, onTaskUpdated }: { taskId: string; onTask
                 decide={decide}
                 completed={progress?.task_status === "done"}
                 isMultiGoal={(progress?.goals_total ?? 0) > 1 && (progress?.goals_open ?? 0) > 0}
+                verifyMode={verifyMode}
+                proofConfirmedCount={progress?.accepted_proof_count ?? 0}
               />
             ))
-          ) : (
+          ) : !showDirectExploitComplete ? (
             <p className="text-sm text-muted-foreground">尚无候选答案。可以先查看阶段 WP 和执行记录。</p>
-          )}
+          ) : null}
         </CardContent>
       </Card>
       <Tabs defaultValue="wp" className="space-y-3">

@@ -20,7 +20,7 @@ func TestCTFToolSchemasAcceptedByProviders(t *testing.T) {
 			for _, legacy := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/stream=%t/legacy=%t", format, stream, legacy), func(t *testing.T) {
 					var schemas []llm.ToolSchema
-					for _, tool := range ctfTools(nil, 1, 1) {
+					for _, tool := range ctfTools(nil, 1, 1, "") {
 						if legacy && (tool.Name() == "ctf_tools" || tool.Name() == "ctf_status") {
 							tool = DecorateTool(tool, "persisted description", map[string]any{"type": "object", "properties": nil})
 						}

@@ -457,6 +457,11 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	effective, pending := splitEffectiveFindings(vulnNodes, allStates)
 	out["findings_total"] = len(effective) // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
 	out["candidates_total"] = len(pending) // 候选/待验收/已否定:可用于补证据与避免重复登记,但不能证明目标
+	if t.ts != nil && t.taskID > 0 {
+		if verifyMode, err := t.ts.Database().TaskCTFVerifyMode(context.Background(), t.taskID); err == nil && verifyMode != "" {
+			out["ctf_verify_mode"] = verifyMode
+		}
+	}
 	// awaiting_goal_evaluations:已提交验收、等待评估的目标数。frontier 为空且
 	// 该值 >0 时应当**等待**,而不是按硬底线重复提交证明或强派新探索。
 	if awaiting, err := t.ts.CountPendingGoalEvaluations(); err == nil {

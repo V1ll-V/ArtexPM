@@ -3067,6 +3067,7 @@ function CreateTaskSheet({
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   const [mode, setMode] = React.useState<"pentest" | "ctf">("pentest");
   const [challengeType, setChallengeType] = React.useState<"auto" | "web" | "pwn" | "reverse" | "crypto" | "misc">("auto");
+  const [ctfVerifyMode, setCtfVerifyMode] = React.useState<"auto" | "flag" | "exploit_proof" | "flag_and_exploit">("auto");
   const [uploading, setUploading] = React.useState(false);
   const [attachmentDraft, setAttachmentDraft] = React.useState("");
   const [vpnDraft, setVpnDraft] = React.useState<{ config: string; filename: string } | null>(null);
@@ -3100,6 +3101,7 @@ function CreateTaskSheet({
       const createdTask = await api.createTask({
         mode,
         challengeType,
+        ctfVerifyMode: mode === "ctf" ? ctfVerifyMode : undefined,
         attachmentBatchId: attachmentDraft,
         ctfVpnConfig: mode === "ctf" ? vpnDraft?.config : undefined,
         ctfVpnFilename: mode === "ctf" ? vpnDraft?.filename : undefined,
@@ -3138,6 +3140,7 @@ function CreateTaskSheet({
       setVpnDraft(null);
       setMode("pentest");
       setChallengeType("auto");
+      setCtfVerifyMode("auto");
       setOpen(false);
       onCreated();
     } catch (e) {
@@ -3193,7 +3196,7 @@ function CreateTaskSheet({
                   const next = e.target.value as "pentest" | "ctf";
                   setMode(next);
                   setCoverageEnabled(next === "pentest");
-                  if (next === "ctf" && !goal.trim()) setGoal("分析本题并获得可验证的 flag，保留解题脚本和原始输出。");
+                  if (next === "ctf" && !goal.trim()) setGoal("分析本题并完成平台要求的验收目标，保留核心 PoC 脚本与验证输出。");
                 }}
               >
                 <option value="pentest">授权渗透测试</option>
@@ -3215,8 +3218,37 @@ function CreateTaskSheet({
                     <option value="crypto">Crypto / 密码学</option>
                     <option value="misc">Misc / 杂项安全</option>
                   </select>
+                  <Label htmlFor="ctf-verify-mode">验收方式</Label>
+                  <select
+                    id="ctf-verify-mode"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={ctfVerifyMode}
+                    onChange={(e) => {
+                      const next = e.target.value as typeof ctfVerifyMode;
+                      setCtfVerifyMode(next);
+                      const trimmed = goal.trim();
+                      if (
+                        !trimmed ||
+                        trimmed === "分析本题并获得可验证的 flag，保留解题脚本和原始输出。" ||
+                        trimmed === "分析本题并完成平台要求的验收目标，保留核心 PoC 脚本与验证输出。"
+                      ) {
+                        if (next === "exploit_proof") {
+                          setGoal("完成题干要求的漏洞利用并核实持久效果（无需提交 flag），提交漏洞利用证明供平台验证。");
+                        } else if (next === "flag_and_exploit") {
+                          setGoal("第 1 阶段先找到并验证真实 Flag；第 2 阶段完成题干要求的漏洞利用并提交证明供平台验证。");
+                        } else {
+                          setGoal("分析本题并获得可验证的 flag，保留解题脚本和原始输出。");
+                        }
+                      }
+                    }}
+                  >
+                    <option value="auto">自动识别（根据描述与目标自动判断，推荐）</option>
+                    <option value="flag">提交 Flag（常规赛题）</option>
+                    <option value="exploit_proof">漏洞利用证明（无需 Flag，平台裁判验证）</option>
+                    <option value="flag_and_exploit">复合验收（先找 Flag 再完成漏洞利用证明）</option>
+                  </select>
                   <p className="text-xs text-muted-foreground">
-                    沿用任务规划、执行和验收流程。可只提供附件；执行所需工具和运行环境需已配置。
+                    沿用任务规划、执行和验收流程。支持常规 Flag、无需 Flag 的漏洞利用证明，以及先 Flag 后利用的复合题型；可按需上传题面附件与赛题 WireGuard VPN 配置。
                   </p>
                   <CTFVpnConfig draftValue={vpnDraft} onDraftChange={setVpnDraft} />
                 </>

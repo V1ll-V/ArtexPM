@@ -198,3 +198,111 @@ func TestCTFReportToolsStaySeparateFromGenericTasks(t *testing.T) {
 		t.Fatal("generic report flow was changed")
 	}
 }
+
+func TestCTFWorkerExploitProofHandsOffWithoutAnotherModelCallAndResumesAfterRejection(t *testing.T) {
+	dsn, _, err := db.DSN()
+	if err != nil {
+		t.Skip("test database required")
+	}
+	pg, err := db.Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pg.Close()
+	task, err := pg.CreateTaskWithOptions("persist exploit", "无需提交 flag，完成持久化漏洞利用并验证", db.TaskCreateOptions{Mode: "ctf", ChallengeType: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pg.DeleteTask(task.ID)
+	if task.CTFVerifyMode != db.CTFVerifyExploitProof {
+		t.Fatalf("expected auto verify mode exploit_proof, got %q", task.CTFVerifyMode)
+	}
+	root := t.TempDir()
+	if err = ctf.New(root, pg).Sync(t.Context(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	var hash string
+	if err = pg.QueryRow(`SELECT ctf_input_hash FROM tasks WHERE id=$1`, task.ID).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	execID := uuid.NewString()
+	stdoutRel := filepath.ToSlash(filepath.Join("ctf", "executions", execID, "stdout.log"))
+	stderrRel := filepath.ToSlash(filepath.Join("ctf", "executions", execID, "stderr.log"))
+	stdoutData := []byte("HTTP 200 OK persisted=/data/pwned_proof.txt\n")
+	for rel, content := range map[string][]byte{stdoutRel: stdoutData, stderrRel: {}} {
+		full := filepath.Join(root, "tasks", fmt.Sprint(task.ID), rel)
+		if err = os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(full, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ex := &db.CTFExecution{ID: execID, TaskID: task.ID, InputHash: hash, Command: "curl verify", StdoutPath: stdoutRel, StderrPath: stderrRel, StdoutSHA: ctf.SHA(stdoutData), StderrSHA: ctf.SHA(nil), StartedAt: time.Now()}
+	if err = pg.SaveCTFExecution(t.Context(), ex); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify ctfBase exposes ctf_submit_exploit_proof and hides ctf_submit_flag.
+	store := pg.Exploration(task.ExplorationID)
+	_, mounted := ctfBase(t.Context(), root, store, task.ID, 1, nil)
+	var hasProofTool, hasFlagTool bool
+	for _, tl := range mounted {
+		if tl.Name() == "ctf_submit_exploit_proof" {
+			hasProofTool = true
+		}
+		if tl.Name() == "ctf_submit_flag" {
+			hasFlagTool = true
+		}
+	}
+	if !hasProofTool || hasFlagTool {
+		t.Fatalf("unexpected tool mounting: hasProof=%v hasFlag=%v", hasProofTool, hasFlagTool)
+	}
+
+	intentID, err := store.AddIntent(map[string]any{"summary": "verify persistent exploit"}, 5, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, _ := store.GetNode(intentID)
+	calls := 0
+	provider := captureUsageProvider{stream: func(_ context.Context, y func(llm.StreamEvent, error) bool) {
+		calls++
+		if calls == 1 {
+			input, _ := json.Marshal(map[string]any{"execution_id": ex.ID, "proof_summary": "写入持久化文件成功", "target_effect": "GET 验证存在"})
+			for _, event := range []llm.StreamEvent{{Type: llm.SEToolUseStart, ToolID: "submit-proof", ToolName: "ctf_submit_exploit_proof"}, {Type: llm.SEToolInputJSON, Text: string(input)}, {Type: llm.SEMessageDelta, StopReason: "tool_use"}} {
+				if !y(event, nil) {
+					return
+				}
+			}
+		} else {
+			if y(llm.StreamEvent{Type: llm.SETextDelta, Text: "retry after rejection"}, nil) {
+				y(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "end_turn"}, nil)
+			}
+		}
+	}}
+	worker := NewWorker(provider, "local", root, nil, 0, 6)
+	var records []db.Activity
+	reason, _, err := worker.Execute(t.Context(), "work", task.ID, nil, store, intent, nil, func(a db.Activity) { records = append(records, a) }, nil, nil)
+	if err != nil || reason != ReasonCTFSubmission || calls != 1 {
+		t.Fatalf("reason=%s calls=%d err=%v", reason, calls, err)
+	}
+	planner := NewPlanner(provider, "local", root, nil, 0, 4)
+	met, planReason, err := planner.Plan(t.Context(), task.ID, nil, store, "persist exploit", nil, nil)
+	if err != nil || met || calls != 1 || !strings.Contains(planReason, "漏洞利用证明") {
+		t.Fatalf("unexpected planner result: met=%v calls=%d reason=%q err=%v", met, calls, planReason, err)
+	}
+	if _, err = ctf.New(root, pg).Execute(t.Context(), task.ID, intentID, "blocked", 1); err == nil || !strings.Contains(err.Error(), "等待用户") {
+		t.Fatalf("expected wait error, got %v", err)
+	}
+	cand, err := pg.PendingCTFSubmission(t.Context(), task.ID)
+	if err != nil || cand == nil || cand.Kind != db.CTFCandidateExploitProof {
+		t.Fatalf("expected pending exploit_proof candidate, got %+v %v", cand, err)
+	}
+	if _, err = pg.DecideCTFCandidate(t.Context(), task.ID, cand.ID, cand.Revision, "rejected", "platform verify failed"); err != nil {
+		t.Fatal(err)
+	}
+	reason, _, err = worker.Execute(t.Context(), "work", task.ID, nil, store, intent, nil, nil, nil, nil)
+	if err != nil || reason != harness.ReasonCompleted || calls != 2 {
+		t.Fatalf("rejection did not release worker: reason=%s calls=%d err=%v", reason, calls, err)
+	}
+}

@@ -863,6 +863,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/ctf/wp/optimize", s.ctfOptimizeWP)
 	mux.HandleFunc("POST /api/tasks/{id}/ctf/wp/reset", s.ctfResetWP)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/evidence", s.ctfEvidence)
+	mux.HandleFunc("PUT /api/tasks/{id}/ctf/verify-mode", s.ctfSetVerifyMode)
+	mux.HandleFunc("POST /api/tasks/{id}/ctf/complete-exploit", s.ctfCompleteExploit)
 	mux.HandleFunc("POST /api/tasks/{id}/ctf/candidates/{candidateID}", s.decideCTFFlag)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/executions/{executionID}/log", s.ctfExecutionLog)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/vpn", s.ctfVPNGet)
@@ -1504,6 +1506,7 @@ func truncateReply(s string) string {
 type createTaskReq struct {
 	Mode                 string   `json:"mode"`
 	ChallengeType        string   `json:"challenge_type"`
+	CTFVerifyMode        string   `json:"ctf_verify_mode"`
 	AttachmentBatchID    string   `json:"attachment_batch_id"`
 	CTFVPNConfig         string   `json:"ctf_vpn_config"`
 	CTFVPNFilename       string   `json:"ctf_vpn_filename"`
@@ -1533,6 +1536,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		req.Description = "未命名任务"
 	}
 	if _, _, err := db.NormalizeTaskMode(req.Mode, req.ChallengeType); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	verifyMode, err := db.NormalizeCTFVerifyMode(req.Mode, req.CTFVerifyMode, req.Description, req.Goal)
+	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -1592,7 +1600,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
-		Mode: req.Mode, ChallengeType: req.ChallengeType, AttachmentBatchID: req.AttachmentBatchID,
+		Mode: req.Mode, ChallengeType: req.ChallengeType, CTFVerifyMode: verifyMode, AttachmentBatchID: req.AttachmentBatchID,
 		CTFVPNConfig: vpnConfig, CTFVPNHash: vpnHash, CTFVPNFilename: vpnFilename,
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
@@ -1601,7 +1609,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		InterceptRules:  interceptRules,
 	})
 	if err != nil {
-		if errors.Is(err, db.ErrTaskModeInvalid) {
+		if errors.Is(err, db.ErrTaskModeInvalid) || errors.Is(err, db.ErrCTFVerifyModeInvalid) {
 			writeErr(w, 400, err.Error())
 			return
 		}

@@ -362,6 +362,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			return false, "", err
 		}
 		if pending != nil {
+			if pending.Kind == db.CTFCandidateExploitProof {
+				return false, "漏洞利用证明等待用户在平台验证", nil
+			}
 			return false, "候选 Flag 等待用户提交验证", nil
 		}
 	}
@@ -493,7 +496,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
 		renderPlannerTodos(opts.Todos.List())
 	if ctfMode {
-		input = "（请全程使用简体中文进行内部思考与规划）根据当前 CTF 状态与题型特征通过 add_intent 协调 Worker 推进最短解法：若有未确认的候选 Flag 则等待用户；若已有 Flag 已确认，用已有证据标记对应分目标达成（prove_goal）；若图谱尚无任何探索意图/事实，请按题型规律开局派发（Web/Misc 可一次派发 2~3 个平行侦察意图；Pwn/Reverse 先派 1~2 个标明 phase=\"recon\" 的轻量前置侦察意图——只做解包/保护检查/环境就绪及远程握手抓菜单与 PoW，待收齐 fact 后再传 parent_ids 派 1 个动静合一主攻意图）；若 Worker 刚写回新事实，请传 parent_ids 派生下游利用意图，形成连贯探索链路，严禁重复派发同一方向或在 Pwn 主线尚未失败前并跑重复 EXP；若仍有未达成目标且当前无 open/running 意图，本轮必须至少产出一个推进意图。" + situational + renderPlannerTodos(opts.Todos.List())
+		input = "（请全程使用简体中文进行内部思考与规划）根据当前 CTF 状态（注意 verify_mode：flag / exploit_proof / flag_and_exploit；CTF 模式禁用 report_finding 故 findings_total 恒为 0 属正常现象）通过 add_intent 协调 Worker 推进最短解法：若有待确认候选（pending_count>0）则等待用户确认；若 verify_mode=exploit_proof 且效果已实证达成却未提交证明，指示 Worker 调用 ctf_submit_exploit_proof；若 verify_mode=flag_and_exploit 且 Stage 1 Flag 已确认（accepted_flag_count>=1, accepted_proof_count=0），立即派发第 2 阶段利用意图直至提交漏洞利用证明；若满足验收条件则调用 prove_goal；若图谱尚无探索意图/事实，按题型开局派发（Web/Misc 可并发 2~3 个；Pwn/Reverse 先派 1~2 个 phase=\"recon\"，收齐 fact 后再传 parent_ids 派 1 个动静合一主攻意图）；严禁重复派发同一方向；若仍有未达成目标且当前无 open/running/paused 意图，本轮必须至少产出一个推进意图。" + situational + renderPlannerTodos(opts.Todos.List())
 	}
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。

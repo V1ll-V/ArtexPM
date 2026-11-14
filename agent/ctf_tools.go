@@ -28,6 +28,7 @@ func ctfBase(ctx context.Context, root string, ts *db.ExplorationStore, task, in
 		return ctx, base
 	}
 	service := ctf.New(root, ts.Database())
+	verifyMode, _ := ts.Database().TaskCTFVerifyMode(ctx, task)
 	out := []actool.CoreTool{}
 	for _, t := range base {
 		switch t.Name() {
@@ -38,7 +39,7 @@ func ctfBase(ctx context.Context, root string, ts *db.ExplorationStore, task, in
 		}
 		out = append(out, t)
 	}
-	out = append(out, ctfTools(service, task, intent)...)
+	out = append(out, ctfTools(service, task, intent, verifyMode)...)
 	return context.WithValue(ctx, ctfRunKey{}, true), out
 }
 
@@ -76,7 +77,7 @@ var ctfExecutionTools = []string{"Bash", "Write", "Edit", "ctf_http", "ctf_binar
 
 func ctfCatalogTools() []actool.CoreTool {
 	out := []actool.CoreTool{}
-	for _, t := range ctfTools(nil, 0, 0) {
+	for _, t := range ctfTools(nil, 0, 0, "") {
 		if strings.HasPrefix(t.Name(), "ctf_") {
 			out = append(out, t)
 		}
@@ -84,7 +85,7 @@ func ctfCatalogTools() []actool.CoreTool {
 	return out
 }
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
+func ctfTools(s *ctf.Service, task, intent int64, verifyMode string) []actool.CoreTool {
 	run := func(ctx context.Context, command string, timeout int) (actool.Result, error) {
 		if s == nil {
 			return actool.Errorf("CTF 工具仅在 CTF 任务上下文可用"), nil
@@ -249,6 +250,22 @@ func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
 				return actool.Errorf(err.Error()), nil
 			}
 			return actool.Text(fmt.Sprintf("候选 #%d 已登记；尚未确认，请保留脚本与复现步骤。", id)), nil
+		}),
+		writeTool("ctf_submit_exploit_proof", "专用于「无需 Flag、需平台裁判机验证」的漏洞利用证明类任务（exploit_proof / flag_and_exploit 第 2 阶段）：将真实执行结果作为利用证明提交，触发自动交接等待用户在赛题平台点击「验证漏洞利用」并确认通过。严禁用于传统仅提交 Flag 的题目，也不能凭空编造未执行的证明。", obj(map[string]any{
+			"execution_id":  str("完成并验证利用效果的真实执行 ID（必须有真实输出或脚本产物）"),
+			"proof_summary": str("一句中文精准概括已实证达成的漏洞利用效果（如：已越权写入 /data/pwned_proof.txt 并通过二次读取确认持久化）"),
+			"target_effect": str("可由平台裁判机校验的具体细节、关键响应或持久化状态说明"),
+		}, "execution_id", "proof_summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			var a map[string]json.RawMessage
+			_ = json.Unmarshal(in, &a)
+			if s == nil {
+				return actool.Errorf("需要 CTF 上下文"), nil
+			}
+			id, err := s.SubmitExploitProof(ctx, task, text(a, "execution_id"), text(a, "proof_summary"), text(a, "target_effect"))
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("漏洞利用证明 #%d 已登记并等待用户在赛题平台验证；请保留复现脚本与证据并交接。", id)), nil
 		}),
 		writeTool("ctf_run_background", "在独立容器中启动后台长任务（如耗时暴破、深度 Ghidra 反编译、长时间 fuzz 或解题计算），不受 300 秒单次执行超时限制。返回 job_id，后续可通过 ctf_job_status 轮询进展与日志，通过 ctf_job_stop 终止。", obj(map[string]any{
 			"command": str("要在后台运行的 Bash 命令"),
@@ -518,7 +535,17 @@ func ctfTools(s *ctf.Service, task, intent int64) []actool.CoreTool {
 			return "ls -lah -- " + quote(p), 30, err
 		}),
 	)
-	return tools
+	filtered := make([]actool.CoreTool, 0, len(tools))
+	for _, tl := range tools {
+		if verifyMode == db.CTFVerifyExploitProof && tl.Name() == "ctf_submit_flag" {
+			continue
+		}
+		if verifyMode == db.CTFVerifyFlag && tl.Name() == "ctf_submit_exploit_proof" {
+			continue
+		}
+		filtered = append(filtered, tl)
+	}
+	return filtered
 }
 
 // Legacy run-directory instructions are superseded by the CTF execution scope.
@@ -533,8 +560,10 @@ Bash 和文件工具只在独立容器 /work 执行；脚本写在 /work。应�
 多轮交互挑战：对于需要交互菜单选择、多轮 stdin 输入或动态交互的靶机/本地程序，请使用 ctf_session_start 启动持久 PTY 会话，使用 ctf_session_send 发送多轮输入，使用 ctf_session_read 接收输出（输出中的 Flag 同样会自动提取并登记候选），结束时调用 ctf_session_close。
 长耗时任务（如大型程序 Ghidra 反编译、密码字典暴破、全路径符号执行等预计超过 2 分钟的任务）请使用 ctf_run_background 后台运行，并用 ctf_job_status 轮询结果与日志，避免单个命令超时。
 大体积文件处理：解压超过 64 MiB 的大型中间产物（如巨型 docx/xml、固件镜像、大型流量包等）建议直接解压至 /tmp 下分析，仅将解题脚本与关键结果保存在 /work。
-执行自动保存命令、输出、脚本及 execution_id，常见 Flag 自动登记候选；非标准答案才需 ctf_submit_flag，且必须来自真实执行输出。
-一旦出现候选，立即停止探测、重复 payload、资产扩展、漏洞报告和目标证明；只交付候选值、来源执行和一句解法摘要，等待用户提交题目平台验证。WP 无需额外模型整理。
-候选不是正确答案：用户确认后才引用已确认记录证明对应最终目标；用户否定后按反馈继续，避免再次提交同一被否定答案。
-分析步骤不拆成必须验收的目标；多 Flag 或额外交付只按用户明确要求处理。`, filepath.Join(root, "tasks", fmt.Sprint(task), fmt.Sprintf("i%d", intent)))
+执行自动保存命令、输出、脚本及 execution_id：
+- 若本题需要 Flag：常见 Flag 自动登记候选；非标准格式才需 ctf_submit_flag，且必须来自真实执行输出。
+- 若本题为「漏洞利用证明（无需 Flag）」或「复合验收第 2 阶段」：在目标环境实际完成利用并通过二次验证确认效果持久化后，调用 ctf_submit_exploit_proof 提交证明（必须绑定真实 execution_id 与实际验证细节）。
+一旦提交候选或证明，立即停止探测、重复 payload、资产扩展、漏洞报告和目标证明；只交付核心结论与来源执行，等待用户到赛题平台验证。WP 无需额外模型整理。
+候选不是最终通过结论：用户确认后才引用已确认记录证明对应目标；用户否定后按反馈继续，避免再次提交同一被否定答案。
+分析步骤不拆成必须验收的目标；多阶段或多 Flag 交付按题干要求与用户确认状态推进。`, filepath.Join(root, "tasks", fmt.Sprint(task), fmt.Sprintf("i%d", intent)))
 }

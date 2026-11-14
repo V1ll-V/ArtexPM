@@ -8,17 +8,20 @@ import (
 )
 
 type Progress struct {
-	Phase          string            `json:"phase"`
-	TaskStatus     string            `json:"task_status"`
-	Paused         bool              `json:"paused"`
-	InputHash      string            `json:"input_hash"`
-	ExecutionCount int               `json:"execution_count"`
-	PendingCount   int               `json:"pending_count"`
-	AcceptedCount  int               `json:"accepted_count"`
-	GoalsTotal     int               `json:"goals_total"`
-	GoalsMet       int               `json:"goals_met"`
-	GoalsOpen      int               `json:"goals_open"`
-	Candidates     []db.CTFCandidate `json:"candidates,omitempty"`
+	Phase              string            `json:"phase"`
+	VerifyMode         string            `json:"verify_mode,omitempty"`
+	TaskStatus         string            `json:"task_status"`
+	Paused             bool              `json:"paused"`
+	InputHash          string            `json:"input_hash"`
+	ExecutionCount     int               `json:"execution_count"`
+	PendingCount       int               `json:"pending_count"`
+	AcceptedCount      int               `json:"accepted_count"`
+	AcceptedFlagCount  int               `json:"accepted_flag_count"`
+	AcceptedProofCount int               `json:"accepted_proof_count"`
+	GoalsTotal         int               `json:"goals_total"`
+	GoalsMet           int               `json:"goals_met"`
+	GoalsOpen          int               `json:"goals_open"`
+	Candidates         []db.CTFCandidate `json:"candidates,omitempty"`
 }
 
 // Current input and operator decisions are authoritative; a candidate or a
@@ -28,13 +31,17 @@ func (s *Service) Progress(ctx context.Context, task int64) (Progress, error) {
 	if err := s.Sync(ctx, task); err != nil {
 		return p, err
 	}
-	if err := s.DB.QueryRowContext(ctx, `SELECT status,paused,ctf_input_hash,
+	var rawVerify, desc, goal string
+	if err := s.DB.QueryRowContext(ctx, `SELECT status,paused,ctf_input_hash,COALESCE(ctf_verify_mode,''),COALESCE(description,''),COALESCE(goal,''),
  (SELECT count(*) FROM ctf_executions WHERE task_id=tasks.id),
  (SELECT count(*) FROM ctf_candidates WHERE task_id=tasks.id AND input_hash=tasks.ctf_input_hash AND state='candidate'),
- (SELECT count(*) FROM ctf_candidates WHERE task_id=tasks.id AND input_hash=tasks.ctf_input_hash AND state='accepted')
- FROM tasks WHERE id=$1 AND mode='ctf' AND deleted_at IS NULL`, task).Scan(&p.TaskStatus, &p.Paused, &p.InputHash, &p.ExecutionCount, &p.PendingCount, &p.AcceptedCount); err != nil {
+ (SELECT count(*) FROM ctf_candidates WHERE task_id=tasks.id AND input_hash=tasks.ctf_input_hash AND state='accepted'),
+ (SELECT count(*) FROM ctf_candidates WHERE task_id=tasks.id AND input_hash=tasks.ctf_input_hash AND state='accepted' AND kind<>'exploit_proof'),
+ (SELECT count(*) FROM ctf_candidates WHERE task_id=tasks.id AND input_hash=tasks.ctf_input_hash AND state='accepted' AND kind='exploit_proof')
+ FROM tasks WHERE id=$1 AND mode='ctf' AND deleted_at IS NULL`, task).Scan(&p.TaskStatus, &p.Paused, &p.InputHash, &rawVerify, &desc, &goal, &p.ExecutionCount, &p.PendingCount, &p.AcceptedCount, &p.AcceptedFlagCount, &p.AcceptedProofCount); err != nil {
 		return p, fmt.Errorf("读取 CTF 解题状态：%w", err)
 	}
+	p.VerifyMode = db.EffectiveCTFVerifyMode(rawVerify, desc, goal)
 
 	var goalsTotal, goalsMet, goalsOpen int
 	_ = s.DB.QueryRowContext(ctx, `SELECT

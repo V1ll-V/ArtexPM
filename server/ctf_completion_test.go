@@ -64,3 +64,47 @@ func TestCTFConfirmationUpdatesLiveTaskStatusWithoutModel(t *testing.T) {
 		t.Fatal("revocation mirror stale", state)
 	}
 }
+
+func TestCTFVerifyModeAndCompleteExploitEndpoints(t *testing.T) {
+	pg := privateVerificationDB(t)
+	root := t.TempDir()
+	row, err := pg.CreateTaskWithOptions("deface", "无需提交 flag，点击验证漏洞利用", db.TaskCreateOptions{Mode: "ctf", ChallengeType: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pg.DeleteTask(row.ID)
+	if row.CTFVerifyMode != db.CTFVerifyExploitProof {
+		t.Fatalf("expected exploit_proof, got %q", row.CTFVerifyMode)
+	}
+	if err = ctf.New(root, pg).Sync(t.Context(), row.ID); err != nil {
+		t.Fatal(err)
+	}
+	row, _ = pg.GetTask(row.ID)
+	task := taskFromPG(row, pg.Exploration(row.ExplorationID), nil)
+	m := &Manager{pg: pg, dir: root, tasks: map[string]*Task{task.ID: task}}
+	s := &Server{m: m, engine: NewEngine(m), ctx: t.Context()}
+
+	// Switch to flag_and_exploit via PUT /ctf/verify-mode
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/local", strings.NewReader(`{"verify_mode":"flag_and_exploit"}`))
+	r.SetPathValue("id", task.ID)
+	s.ctfSetVerifyMode(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "flag_and_exploit") {
+		t.Fatalf("verify-mode switch failed: %d %s", w.Code, w.Body.String())
+	}
+	if task.lifecycleSnapshot().CTFVerifyMode != db.CTFVerifyFlagAndExploit {
+		t.Fatalf("live verify mode not updated: %+v", task.lifecycleSnapshot())
+	}
+
+	// Complete directly via POST /ctf/complete-exploit
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("POST", "/local", strings.NewReader(`{"proof_summary":"首页横幅已篡改并保留","notes":"平台裁判验证通过"}`))
+	r.SetPathValue("id", task.ID)
+	s.ctfCompleteExploit(w, r)
+	if w.Code != 200 {
+		t.Fatalf("complete-exploit failed: %d %s", w.Code, w.Body.String())
+	}
+	if state := task.lifecycleSnapshot(); state.Status != "done" || state.CompletedAt == 0 || state.Paused {
+		t.Fatalf("expected live task done after complete-exploit, got %+v", state)
+	}
+}

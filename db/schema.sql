@@ -557,6 +557,9 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_input_hash TEXT NOT NULL DEFAULT 
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_vpn_config TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_vpn_hash TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_vpn_filename TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_verify_mode TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_ctf_verify_mode_check;
+ALTER TABLE tasks ADD CONSTRAINT tasks_ctf_verify_mode_check CHECK (ctf_verify_mode IN ('','flag','exploit_proof','flag_and_exploit'));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_attachment_batch ON tasks(attachment_batch_id) WHERE attachment_batch_id<>'';
 
 CREATE TABLE IF NOT EXISTS ctf_executions (
@@ -586,6 +589,9 @@ CREATE TABLE IF NOT EXISTS ctf_candidates (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(task_id,execution_id,value)
 );
+ALTER TABLE ctf_candidates ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'flag';
+ALTER TABLE ctf_candidates DROP CONSTRAINT IF EXISTS ctf_candidates_kind_check;
+ALTER TABLE ctf_candidates ADD CONSTRAINT ctf_candidates_kind_check CHECK (kind IN ('flag','exploit_proof'));
 CREATE INDEX IF NOT EXISTS idx_ctf_candidates_task ON ctf_candidates(task_id,id);
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an

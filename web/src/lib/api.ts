@@ -256,6 +256,7 @@ export const api = {
   createTask: (input: {
     mode?: "pentest" | "ctf";
     challengeType?: "auto" | "web" | "pwn" | "reverse" | "crypto" | "misc";
+    ctfVerifyMode?: "auto" | "flag" | "exploit_proof" | "flag_and_exploit";
     attachmentBatchId?: string;
     ctfVpnConfig?: string;
     ctfVpnFilename?: string;
@@ -275,6 +276,7 @@ export const api = {
     post<Task>("/tasks", {
       mode: input.mode ?? "pentest",
       challenge_type: input.mode === "ctf" ? (input.challengeType ?? "auto") : "",
+      ctf_verify_mode: input.mode === "ctf" ? (input.ctfVerifyMode ?? "auto") : "",
       attachment_batch_id: input.attachmentBatchId ?? "",
       ctf_vpn_config: input.mode === "ctf" ? (input.ctfVpnConfig ?? "") : "",
       ctf_vpn_filename: input.mode === "ctf" ? (input.ctfVpnFilename ?? "") : "",
@@ -334,6 +336,10 @@ export const api = {
   optimizeCTFWP: (id: string) => post<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp/optimize`, {}),
   resetCTFWP: (id: string) => post<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp/reset`, {}),
   ctfEvidence: (id: string, signal?: AbortSignal) => http<{ executions: CTFExecution[]; candidates: CTFCandidate[]; progress?: CTFProgress }>(`/tasks/${encodeURIComponent(id)}/ctf/evidence`, { signal }),
+  setCTFVerifyMode: (id: string, verifyMode: "auto" | "flag" | "exploit_proof" | "flag_and_exploit") =>
+    put<{ verify_mode: string }>(`/tasks/${encodeURIComponent(id)}/ctf/verify-mode`, { verify_mode: verifyMode }),
+  completeCTFExploit: (id: string, body?: { execution_id?: string; proof_summary?: string; notes?: string }) =>
+    post<{ ok: boolean; candidate?: CTFCandidate }>(`/tasks/${encodeURIComponent(id)}/ctf/complete-exploit`, body ?? {}),
   decideCTFFlag: (task: string, candidate: CTFCandidate, state: "accepted" | "rejected", notes: string, completeTask = false) =>
     post<CTFCandidate>(`/tasks/${encodeURIComponent(task)}/ctf/candidates/${candidate.id}`, { state, notes, revision: candidate.revision, complete_task: completeTask }),
   ctfLog: async (task: string, execution: string, stream: "stdout" | "stderr") => {
