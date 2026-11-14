@@ -92,30 +92,48 @@ func (e *Engine) Container(ctx context.Context, name string) (Container, error) 
 }
 
 func (e *Engine) Ensure(ctx context.Context, name, task, inputHash string) (string, error) {
+	return e.EnsureSession(ctx, name, task, inputHash, "")
+}
+
+func (e *Engine) EnsureSession(ctx context.Context, name, task, inputHash, vpnHash string) (string, error) {
+	netMode, wgID, err := e.resolveSessionNetwork(ctx, task, vpnHash)
+	if err != nil {
+		return "", err
+	}
 	c, err := e.Container(ctx, name)
 	if err == nil {
 		if c.Config.Labels["artex.ctf.managed"] != "true" || c.Config.Labels["artex.ctf.task"] != task || c.Config.Labels["artex.ctf.input"] != inputHash {
 			return "", errors.New("CTF container ownership/input mismatch")
 		}
-		if !c.State.Running {
-			if err = e.json(ctx, "POST", "/containers/"+c.ID+"/start", nil, nil); err != nil {
+		if c.Config.Labels["artex.ctf.vpn"] != vpnHash || c.Config.Labels["artex.ctf.wg_id"] != wgID {
+			if err = e.removeContainerOnly(ctx, name); err != nil {
 				return "", err
 			}
+		} else {
+			if !c.State.Running {
+				if err = e.json(ctx, "POST", "/containers/"+c.ID+"/start", nil, nil); err != nil {
+					return "", err
+				}
+			}
+			return c.ID, nil
 		}
-		return c.ID, nil
-	}
-	if !strings.Contains(err.Error(), ": 404 ") {
+	} else if !strings.Contains(err.Error(), ": 404 ") {
 		return "", err
 	}
 	volume := name + "-work"
 	if err = e.json(ctx, "POST", "/volumes/create", map[string]any{"Name": volume, "Labels": map[string]string{"artex.ctf.managed": "true", "artex.ctf.task": task}}, nil); err != nil {
 		return "", err
 	}
+	labels := map[string]string{"artex.ctf.managed": "true", "artex.ctf.task": task, "artex.ctf.input": inputHash}
+	if vpnHash != "" {
+		labels["artex.ctf.vpn"] = vpnHash
+		labels["artex.ctf.wg_id"] = wgID
+	}
 	config := map[string]any{
 		"Image": e.Image, "User": "1000:1000", "WorkingDir": "/work", "Entrypoint": []string{"sleep"}, "Cmd": []string{"infinity"},
 		"Env":        toolEnvironment(),
-		"Labels":     map[string]string{"artex.ctf.managed": "true", "artex.ctf.task": task, "artex.ctf.input": inputHash},
-		"HostConfig": map[string]any{"ReadonlyRootfs": true, "Memory": int64(3 << 30), "NanoCpus": int64(2e9), "PidsLimit": int64(256), "CapDrop": []string{"ALL"}, "CapAdd": []string{"SYS_PTRACE"}, "SecurityOpt": []string{"no-new-privileges:true"}, "NetworkMode": "bridge", "Tmpfs": map[string]string{"/tmp": "rw,nosuid,size=512m,mode=1777"}, "Mounts": []map[string]any{{"Type": "volume", "Source": volume, "Target": "/work"}}},
+		"Labels":     labels,
+		"HostConfig": map[string]any{"ReadonlyRootfs": true, "Memory": int64(3 << 30), "NanoCpus": int64(2e9), "PidsLimit": int64(256), "CapDrop": []string{"ALL"}, "CapAdd": []string{"SYS_PTRACE"}, "SecurityOpt": []string{"no-new-privileges:true"}, "NetworkMode": netMode, "Tmpfs": map[string]string{"/tmp": "rw,nosuid,size=512m,mode=1777"}, "Mounts": []map[string]any{{"Type": "volume", "Source": volume, "Target": "/work"}}},
 	}
 	var result struct{ ID string }
 	if err = e.json(ctx, "POST", "/containers/create?name="+url.QueryEscape(name), config, &result); err != nil {
@@ -138,17 +156,31 @@ type Result struct {
 }
 
 func (e *Engine) Exec(ctx context.Context, id, command string) (result Result, err error) {
+	return e.execWithOptions(ctx, id, "1000:1000", "/work", "/bin/bash", command, toolEnvironment(), true)
+}
+
+func (e *Engine) execRoot(ctx context.Context, id, command string) (result Result, err error) {
+	return e.execWithOptions(ctx, id, "0:0", "/run/wg", "/bin/sh", command, nil, false)
+}
+
+func (e *Engine) execWithOptions(ctx context.Context, id, user, workdir, shell, command string, env []string, killOnErr bool) (result Result, err error) {
 	result.StartedAt = time.Now().UTC()
 	result.ExitCode = -1
 	defer func() { result.FinishedAt = time.Now().UTC() }()
 	var exec struct{ ID string }
-	if err = e.json(ctx, "POST", "/containers/"+id+"/exec", map[string]any{"AttachStdout": true, "AttachStderr": true, "Tty": false, "User": "1000:1000", "WorkingDir": "/work", "Cmd": []string{"/bin/bash", "-c", command}, "Env": toolEnvironment()}, &exec); err != nil {
+	body := map[string]any{"AttachStdout": true, "AttachStderr": true, "Tty": false, "User": user, "WorkingDir": workdir, "Cmd": []string{shell, "-c", command}}
+	if len(env) > 0 {
+		body["Env"] = env
+	}
+	if err = e.json(ctx, "POST", "/containers/"+id+"/exec", body, &exec); err != nil {
 		return
 	}
 	raw, _ := json.Marshal(map[string]bool{"Detach": false, "Tty": false})
 	r, err := e.call(ctx, "POST", "/exec/"+exec.ID+"/start", bytes.NewReader(raw), "application/json")
 	if err != nil {
-		e.kill(id)
+		if killOnErr {
+			e.kill(id)
+		}
 		return result, err
 	}
 	defer r.Body.Close()
@@ -187,7 +219,9 @@ func (e *Engine) Exec(ctx context.Context, id, command string) (result Result, e
 	result.Stdout = stdout.Bytes()
 	result.Stderr = stderr.Bytes()
 	if err != nil || ctx.Err() != nil {
-		e.kill(id)
+		if killOnErr {
+			e.kill(id)
+		}
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}

@@ -24,6 +24,7 @@ type SessionSpec struct {
 	TaskID    int64  `json:"task_id"`
 	IntentID  int64  `json:"intent_id"`
 	InputHash string `json:"input_hash"`
+	VPNHash   string `json:"vpn_hash,omitempty"`
 }
 type Session struct {
 	Spec        SessionSpec `json:"spec"`
@@ -113,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		reply(w, 200, map[string]any{"ok": true, "image": s.Engine.Image, "image_id": image.ID})
 	})
+	s.registerVPNRoutes(mux)
 	mux.HandleFunc("POST /sessions", func(w http.ResponseWriter, r *http.Request) {
 		var spec SessionSpec
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&spec); err != nil || !spec.Valid() {
@@ -130,7 +132,7 @@ func (s *Server) Handler() http.Handler {
 		if v == nil {
 			v = &Session{Spec: spec, Name: "artex-ctf-" + key}
 		}
-		id, err := s.Engine.Ensure(r.Context(), v.Name, fmt.Sprint(spec.TaskID), spec.InputHash)
+		id, err := s.Engine.EnsureSession(r.Context(), v.Name, fmt.Sprint(spec.TaskID), spec.InputHash, strings.TrimSpace(spec.VPNHash))
 		if err != nil {
 			fail(w, err)
 			return

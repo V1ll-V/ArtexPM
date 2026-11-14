@@ -2,6 +2,18 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.8.1] - 2026-11-14
+
+### 新增与优化
+- **TPCTF 赛题专属 WireGuard VPN 容器化隔离接入（`tpctf` 分支）**：
+  - 支持在创建 CTF 任务及任务详情「附件与产物」页直接上传或粘贴赛题专属 `.conf`（如 TPCTF `ctfy-*.conf`），宿主机无需运行代理或 WireGuard 客户端。
+  - 新增 `Dockerfile.ctf-wg` 与 `docker/ctf-wg/entrypoint.sh`：为每个启用 VPN 的任务按需启动独立 WireGuard Sidecar 容器（`artex-ctf-wg-<taskID>`），注入匿名 `/run/wg/wg0.conf` 与隧道 DNS（`/etc/resolv.conf` 优先使用题目 DNS 解析 `*.internal` 及 `ctfy-callback`）。
+  - 工具容器 `artex-ctf-*` 保持非 root、只读根文件系统及 `ALL` 降权配置，仅通过 `NetworkMode: "container:<wg_id>"` 共享所属任务的 VPN 网络命名空间，实现多题同网段（如多个 `172.17.112.0/24`）并行互不冲突。
+  - `ctfrunner` 自动托管隔离网段 `artex-ctf-vpn`（默认 `10.220.0.0/16`），彻底规避与 Docker 默认 `bridge`（`172.17.0.0/16`）的子网冲突。
+  - 新增严格 WireGuard 解析校验器（`ctfrunner.ParseWireGuardConfig`）：仅白名单放行标准客户端字段，显式拒绝 `PreUp`/`PostUp`/`PreDown`/`PostDown`/`SaveConfig`/`Table` 等可执行钩子；接口层永不回传 `PrivateKey`。
+  - 变更或移除 VPN 配置时保留 `/work` 持久化数据卷仅重建工具容器；删除任务时联动清理对应的 VPN Sidecar 与隔离容器资源。
+  - 版本标识更新至 `v0.8.1`，附带独立架构与可拆卸说明文档 `docs/tpctf-vpn-design.md`。
+
 ## [0.8.0] - 2026-11-13
 
 ### 新增与优化

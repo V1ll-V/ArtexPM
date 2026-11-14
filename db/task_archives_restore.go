@@ -373,6 +373,7 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
 	}
 	_, err = tx.Exec(`UPDATE tasks current SET
  mode=COALESCE(archived.mode,'pentest'),challenge_type=COALESCE(archived.challenge_type,''),attachment_batch_id=COALESCE(archived.attachment_batch_id,''),ctf_input_hash=COALESCE(archived.ctf_input_hash,''),
+ ctf_vpn_config=COALESCE(archived.ctf_vpn_config,''),ctf_vpn_hash=COALESCE(archived.ctf_vpn_hash,''),ctf_vpn_filename=COALESCE(archived.ctf_vpn_filename,''),
  name=archived.name,category_id=archived.category_id,description=archived.description,goal=archived.goal,
  status=archived.status,paused=archived.paused,queued=false,queued_at=NULL,queue_mode='',
  llm_profile_id=archived.llm_profile_id,active_llm_profile_id=archived.active_llm_profile_id,

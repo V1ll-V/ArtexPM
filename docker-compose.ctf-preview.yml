@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
 
   artex:
-    image: autumn27/artex:v0.8.0
+    image: autumn27/artex:v0.8.1
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,10 +36,13 @@ services:
     restart: unless-stopped
 
   ctf-runner:
-    image: autumn27/artex-ctf-runner:20261109
+    image: autumn27/artex-ctf-runner:0.8.1
     environment:
       ARTEX_CTF_RUNNER_TOKEN: ${ARTEX_CTF_RUNNER_TOKEN:?请在 data/ctf-preview.env 设置执行器令牌}
       ARTEX_CTF_TOOL_IMAGE: autumn27/artex-ctf-tools:20261113
+      ARTEX_CTF_WG_IMAGE: autumn27/artex-ctf-wg:0.8.1
+      ARTEX_CTF_VPN_NETWORK: artex-ctf-vpn
+      ARTEX_CTF_VPN_SUBNET: 10.220.0.0/16
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - preview_runner_state:/state

@@ -47,6 +47,7 @@ import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-ed
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskAttachments } from "@/components/task-attachments";
+import { CTFVpnConfig } from "@/components/ctf-vpn-config";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { TaskTemplateControls } from "@/components/task-template-controls";
 import {
@@ -1348,6 +1349,7 @@ function TaskNameEditor({ task, onRename }: { task: Task; onRename: (task: Task,
         {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
       </Link>
       {task.mode === "ctf" && <Badge variant="secondary" className="shrink-0 text-[10px]">CTF · {(task.challenge_type || "auto").toUpperCase()}</Badge>}
+      {task.mode === "ctf" && task.ctf_vpn_enabled && <Badge variant="outline" className="shrink-0 text-[10px] text-emerald-600 border-emerald-500/40">VPN</Badge>}
       <Button
         type="button"
         variant="ghost"
@@ -3067,6 +3069,7 @@ function CreateTaskSheet({
   const [challengeType, setChallengeType] = React.useState<"auto" | "web" | "pwn" | "reverse" | "crypto" | "misc">("auto");
   const [uploading, setUploading] = React.useState(false);
   const [attachmentDraft, setAttachmentDraft] = React.useState("");
+  const [vpnDraft, setVpnDraft] = React.useState<{ config: string; filename: string } | null>(null);
   const sheetContentRef = React.useRef<HTMLDivElement>(null);
 
   // load LLM profiles once for the create-task profile picker.
@@ -3098,6 +3101,8 @@ function CreateTaskSheet({
         mode,
         challengeType,
         attachmentBatchId: attachmentDraft,
+        ctfVpnConfig: mode === "ctf" ? vpnDraft?.config : undefined,
+        ctfVpnFilename: mode === "ctf" ? vpnDraft?.filename : undefined,
         name: name.trim(),
         categoryId: categoryID,
         description: description.trim(),
@@ -3130,6 +3135,7 @@ function CreateTaskSheet({
       setCoverageEnabled(true);
       setInterceptRules([]);
       setAttachmentDraft("");
+      setVpnDraft(null);
       setMode("pentest");
       setChallengeType("auto");
       setOpen(false);
@@ -3212,6 +3218,7 @@ function CreateTaskSheet({
                   <p className="text-xs text-muted-foreground">
                     沿用任务规划、执行和验收流程。可只提供附件；执行所需工具和运行环境需已配置。
                   </p>
+                  <CTFVpnConfig draftValue={vpnDraft} onDraftChange={setVpnDraft} />
                 </>
               )}
             </div>

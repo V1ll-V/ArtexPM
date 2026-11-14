@@ -7,7 +7,7 @@ import type { ChatMention } from "@/lib/chat-mentions";
 import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
-  CTFToolStatus, CTFExecution, CTFCandidate, CTFWriteup, CTFProgress,
+  CTFToolStatus, CTFVpnSummary, CTFExecution, CTFCandidate, CTFWriteup, CTFProgress,
   ActiveFindingRetest,
   Activity,
   Agent,
@@ -257,6 +257,8 @@ export const api = {
     mode?: "pentest" | "ctf";
     challengeType?: "auto" | "web" | "pwn" | "reverse" | "crypto" | "misc";
     attachmentBatchId?: string;
+    ctfVpnConfig?: string;
+    ctfVpnFilename?: string;
     name?: string;
     categoryId?: number;
     description: string;
@@ -274,6 +276,8 @@ export const api = {
       mode: input.mode ?? "pentest",
       challenge_type: input.mode === "ctf" ? (input.challengeType ?? "auto") : "",
       attachment_batch_id: input.attachmentBatchId ?? "",
+      ctf_vpn_config: input.mode === "ctf" ? (input.ctfVpnConfig ?? "") : "",
+      ctf_vpn_filename: input.mode === "ctf" ? (input.ctfVpnFilename ?? "") : "",
       name: input.name ?? "",
       category_id: input.categoryId ?? null,
       description: input.description,
@@ -312,6 +316,20 @@ export const api = {
     return response.blob();
   },
   ctfTools: () => get<CTFToolStatus>("/ctf/tools"),
+  ctfVPN: (id: string) => get<CTFVpnSummary>(`/tasks/${encodeURIComponent(id)}/ctf/vpn`),
+  uploadCTFVPNFile: (id: string, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return http<CTFVpnSummary>(`/tasks/${encodeURIComponent(id)}/ctf/vpn`, { method: "PUT", body });
+  },
+  saveCTFVPNText: (id: string, filename: string, content: string) =>
+    http<CTFVpnSummary>(`/tasks/${encodeURIComponent(id)}/ctf/vpn`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename, content }),
+    }),
+  checkCTFVPN: (id: string) => post<CTFVpnSummary>(`/tasks/${encodeURIComponent(id)}/ctf/vpn/check`, {}),
+  deleteCTFVPN: (id: string) => del<CTFVpnSummary>(`/tasks/${encodeURIComponent(id)}/ctf/vpn`),
   ctfWP: (id: string, signal?: AbortSignal) => http<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp`, { signal }),
   optimizeCTFWP: (id: string) => post<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp/optimize`, {}),
   resetCTFWP: (id: string) => post<CTFWriteup>(`/tasks/${encodeURIComponent(id)}/ctf/wp/reset`, {}),

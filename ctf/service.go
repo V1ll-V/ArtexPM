@@ -87,7 +87,17 @@ func (s *Service) prepareSession(ctx context.Context, task, intent int64) (strin
 	if err != nil {
 		return "", ctfrunner.Session{}, m, "", err
 	}
-	spec := ctfrunner.SessionSpec{TaskID: task, IntentID: sessionIntent, InputHash: Hash(m)}
+	spec, err := s.sessionSpec(ctx, task, sessionIntent, m)
+	if err != nil {
+		return "", ctfrunner.Session{}, m, "", err
+	}
+	if spec.VPNHash != "" {
+		if vpnCfg, _, _, vpnErr := s.DB.TaskCTFVPN(ctx, task); vpnErr != nil {
+			return "", ctfrunner.Session{}, m, "", fmt.Errorf("读取 CTF WireGuard 配置失败：%w", vpnErr)
+		} else if _, err = s.Runner.SyncTaskVPN(ctx, task, spec.VPNHash, vpnCfg); err != nil {
+			return "", ctfrunner.Session{}, m, "", fmt.Errorf("同步 CTF WireGuard VPN 失败：%w", err)
+		}
+	}
 	session, err := s.Runner.Prepare(ctx, spec)
 	if err != nil {
 		return "", session, m, "", err

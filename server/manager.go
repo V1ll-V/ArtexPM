@@ -17,6 +17,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/artifacts"
+	"github.com/Autumn-27/artex/ctf"
 	pgdb "github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
@@ -32,6 +33,9 @@ type Task struct {
 	Mode              string `json:"mode"`
 	ChallengeType     string `json:"challenge_type,omitempty"`
 	AttachmentBatchID string `json:"attachment_batch_id,omitempty"`
+	CTFVPNEnabled     bool   `json:"ctf_vpn_enabled,omitempty"`
+	CTFVPNFilename    string `json:"ctf_vpn_filename,omitempty"`
+	CTFVPNHash        string `json:"ctf_vpn_hash,omitempty"`
 	ID                string `json:"id"`
 	ExpID             int64  `json:"exploration_id"`
 	Name              string `json:"name"` // 可选任务名称;空=未命名
@@ -83,20 +87,23 @@ type Task struct {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
-	Name          string
-	PinnedAt      int64
-	Status        string
-	Paused        bool
-	Queued        bool
-	QueuedAt      int64
-	QueueMode     string
-	CompletedAt   int64
-	FirstRunAt    int64
-	DeadlineAt    int64
-	SourceTaskIDs []int64
-	CompanyIDs    []int64
-	CategoryID    *int64
-	CategoryName  string
+	Name           string
+	PinnedAt       int64
+	Status         string
+	Paused         bool
+	Queued         bool
+	QueuedAt       int64
+	QueueMode      string
+	CompletedAt    int64
+	FirstRunAt     int64
+	DeadlineAt     int64
+	SourceTaskIDs  []int64
+	CompanyIDs     []int64
+	CategoryID     *int64
+	CategoryName   string
+	CTFVPNEnabled  bool
+	CTFVPNFilename string
+	CTFVPNHash     string
 }
 
 func (t *Task) lifecycleSnapshot() taskLifecycleState {
@@ -120,10 +127,13 @@ func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 		CompletedAt:   t.CompletedAt,
 		FirstRunAt:    t.FirstRunAt,
 		DeadlineAt:    t.DeadlineAt,
-		SourceTaskIDs: append([]int64(nil), t.SourceTaskIDs...),
-		CompanyIDs:    append([]int64(nil), t.CompanyIDs...),
-		CategoryID:    cloneInt64Ptr(t.CategoryID),
-		CategoryName:  t.CategoryName,
+		SourceTaskIDs:  append([]int64(nil), t.SourceTaskIDs...),
+		CompanyIDs:     append([]int64(nil), t.CompanyIDs...),
+		CategoryID:     cloneInt64Ptr(t.CategoryID),
+		CategoryName:   t.CategoryName,
+		CTFVPNEnabled:  t.CTFVPNEnabled,
+		CTFVPNFilename: t.CTFVPNFilename,
+		CTFVPNHash:     t.CTFVPNHash,
 	}
 }
 
@@ -148,6 +158,9 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.CompanyIDs = append(t.CompanyIDs[:0], state.CompanyIDs...)
 	t.CategoryID = cloneInt64Ptr(state.CategoryID)
 	t.CategoryName = state.CategoryName
+	t.CTFVPNEnabled = state.CTFVPNEnabled
+	t.CTFVPNFilename = state.CTFVPNFilename
+	t.CTFVPNHash = state.CTFVPNHash
 	t.lifecycleMu.Unlock()
 }
 
@@ -836,6 +849,7 @@ func unixNanoOrZero(t *time.Time) int64 {
 func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Interceptor) *Task {
 	return &Task{
 		Mode: pt.Mode, ChallengeType: pt.ChallengeType, AttachmentBatchID: pt.AttachmentBatchID,
+		CTFVPNEnabled: pt.CTFVPNHash != "", CTFVPNFilename: pt.CTFVPNFilename, CTFVPNHash: pt.CTFVPNHash,
 		ID: strconv.FormatInt(pt.ID, 10), ExpID: pt.ExplorationID,
 		Name:       pt.Name,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
@@ -1545,6 +1559,13 @@ func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResul
 		if err := fileStage.commit(); err != nil {
 			finalizeErrs = append(finalizeErrs, fmt.Errorf("finalize task file deletion: %w", err))
 		}
+	}
+	if registered.Mode == "ctf" {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if ctfErr := ctf.New(m.dir, m.pg).CleanupTask(cleanupCtx, n); ctfErr != nil {
+			log.Printf("[task] 清理任务 #%d CTF 容器/VPN 资源失败（可忽略）：%v", n, ctfErr)
+		}
+		cancel()
 	}
 	m.forgetTask(id, n)
 	if err := errors.Join(finalizeErrs...); err != nil {

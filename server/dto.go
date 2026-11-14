@@ -32,6 +32,9 @@ func rawString(raw json.RawMessage) string {
 type TaskDTO struct {
 	Mode                   string             `json:"mode"`
 	ChallengeType          string             `json:"challenge_type,omitempty"`
+	CTFVPNEnabled          bool               `json:"ctf_vpn_enabled,omitempty"`
+	CTFVPNFilename         string             `json:"ctf_vpn_filename,omitempty"`
+	CTFVPNHash             string             `json:"ctf_vpn_hash,omitempty"`
 	InputsBlockedReason    string             `json:"inputs_blocked_reason,omitempty"`
 	ExecutionBlockedReason string             `json:"execution_blocked_reason,omitempty"`
 	ID                     string             `json:"id"`
@@ -115,6 +118,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 	profileIDs := append(make([]int64, 0, len(llmState.ProfileIDs)), llmState.ProfileIDs...)
 	return TaskDTO{
 		Mode: t.Mode, ChallengeType: t.ChallengeType,
+		CTFVPNEnabled: lifecycle.CTFVPNEnabled, CTFVPNFilename: lifecycle.CTFVPNFilename, CTFVPNHash: lifecycle.CTFVPNHash,
 		ID:                 t.ID,
 		ExplorationID:      t.ExpID,
 		Name:               lifecycle.Name,

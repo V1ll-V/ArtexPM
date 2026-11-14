@@ -49,3 +49,32 @@ func ValidAttachmentBatch(id string) bool {
 	u, err := uuid.Parse(id)
 	return err == nil && u.String() == id
 }
+
+// TaskCTFVPN returns the persisted WireGuard config, hash, and filename for an alive task.
+func (d *DB) TaskCTFVPN(ctx context.Context, taskID int64) (config, hash, filename string, err error) {
+	err = d.QueryRowContext(ctx,
+		`SELECT COALESCE(ctf_vpn_config,''), COALESCE(ctf_vpn_hash,''), COALESCE(ctf_vpn_filename,'') FROM tasks WHERE id=$1 AND deleted_at IS NULL`,
+		taskID,
+	).Scan(&config, &hash, &filename)
+	return config, hash, filename, err
+}
+
+// SetTaskCTFVPN persists or clears a CTF task's WireGuard config metadata.
+func (d *DB) SetTaskCTFVPN(ctx context.Context, taskID int64, config, hash, filename string) error {
+	res, err := d.ExecContext(ctx,
+		`UPDATE tasks SET ctf_vpn_config=$2, ctf_vpn_hash=$3, ctf_vpn_filename=$4 WHERE id=$1 AND mode='ctf' AND deleted_at IS NULL`,
+		taskID, config, hash, filename,
+	)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected > 0 {
+		return nil
+	}
+	var mode string
+	if err := d.QueryRowContext(ctx, `SELECT mode FROM tasks WHERE id=$1 AND deleted_at IS NULL`, taskID).Scan(&mode); err != nil {
+		return ErrTaskNotFound
+	}
+	return ErrTaskModeInvalid
+}

@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { StatusBadge } from "@/components/status-badge";
 import { TaskAttachments } from "@/components/task-attachments";
 import { CTFToolStatusCard } from "@/components/ctf-tool-status";
+import { CTFVpnConfig } from "@/components/ctf-vpn-config";
 import { CTFReportTab } from "./_tabs/ctf-report-tab";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -405,6 +406,7 @@ function TaskDetailInner() {
         {task.mode === "ctf" && (
           <p className="text-xs text-muted-foreground">
             CTF · {task.challenge_type === "reverse" ? "RE" : (task.challenge_type || "auto").toUpperCase()}
+            {task.ctf_vpn_enabled ? ` · WireGuard VPN (${task.ctf_vpn_filename || "wg0.conf"})` : ""}
           </p>
         )}
         {/* Tabs */}
@@ -428,6 +430,7 @@ function TaskDetailInner() {
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="artifacts" className="mt-0">
           <TaskAttachments taskId={id} readOnly={terminal} />
+            {task.mode === "ctf" && <CTFVpnConfig taskId={id} readOnly={terminal} onUpdated={load} />}
             {task.mode === "ctf" && <CTFToolStatusCard />}
         </TabsContent>
         <TabsContent value="sessions" className="mt-0">

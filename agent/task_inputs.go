@@ -12,6 +12,7 @@ import (
 
 	"github.com/Autumn-27/artex/artifacts"
 	"github.com/Autumn-27/artex/ctf"
+	"github.com/Autumn-27/artex/ctfrunner"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -64,6 +65,13 @@ func taskInputContextForRole(root string, ts *db.ExplorationStore, taskID, inten
 		} else {
 			fmt.Fprintf(&b, "\n\n【CTF 任务模式】题型=%s。采用 CTF 专用的求解和提交交接流程；最终目标以题目要求和用户目标为准。纯附件题不推断网络资产或扩展扫描范围。工具缺失须明确说明；历史题解和模型文本只是线索，不能代替真实输出或平台验证。\n", challenge)
 			b.WriteString(ctfCategoryPrompt(challenge, m.Files))
+		}
+		if vpnCfg, vpnHash, vpnFilename, vpnErr := ts.Database().TaskCTFVPN(context.Background(), taskID); vpnErr == nil && vpnHash != "" {
+			if prof, parseErr := ctfrunner.ParseWireGuardConfig(vpnCfg); parseErr == nil {
+				tunnelIP := strings.Split(prof.Address, "/")[0]
+				fmt.Fprintf(&b, "\n【赛题专属 WireGuard VPN 已连接】配置文件=%s | 隧道IP=%s | DNS=%s | 内部路由=%s\n说明：本任务的工具容器（ctf_http、ctf_probe_target、ctf_python、ctf_bash、ctf_session_start 等）已接入该赛题独立隔离 WireGuard 隧道网络，可直接解析并访问 *.internal 等赛题内网域名与目标端口（无需宿主机代理）。若题目支持带外回连或反弹 Shell，请在容器内监听端口并让目标连接 `ctfy-callback:<端口>`（或 %s:<端口>）。严禁试图读取或修改 VPN 私钥/隧道网卡。\n",
+					vpnFilename, prof.Address, strings.Join(prof.DNS, ", "), strings.Join(prof.AllowedIPs, ", "), tunnelIP)
+			}
 		}
 		b.WriteString("\n")
 	}

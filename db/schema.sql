@@ -554,6 +554,9 @@ ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_challenge_type_check;
 ALTER TABLE tasks ADD CONSTRAINT tasks_challenge_type_check CHECK (challenge_type IN ('','auto','web','pwn','reverse','crypto','misc'));
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS attachment_batch_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_input_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_vpn_config TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_vpn_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ctf_vpn_filename TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_attachment_batch ON tasks(attachment_batch_id) WHERE attachment_batch_id<>'';
 
 CREATE TABLE IF NOT EXISTS ctf_executions (

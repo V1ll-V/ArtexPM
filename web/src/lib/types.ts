@@ -7,6 +7,9 @@ export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 export interface Task {
   mode?: "pentest" | "ctf";
   challenge_type?: "auto" | "web" | "pwn" | "reverse" | "crypto" | "misc";
+  ctf_vpn_enabled?: boolean;
+  ctf_vpn_filename?: string;
+  ctf_vpn_hash?: string;
   inputs_blocked_reason?: string;
   execution_blocked_reason?: string;
   id: string;
@@ -1730,4 +1733,35 @@ export interface CTFWriteup {
   sha256: string;
   generated_at: string;
   is_optimized?: boolean;
+}
+export interface CTFVpnSidecarStatus {
+  task_id: number;
+  active: boolean;
+  running: boolean;
+  hash?: string;
+  container_id?: string;
+  container?: string;
+  network?: string;
+  interface?: string;
+  tunnel_ip?: string;
+  endpoint?: string;
+  handshake_at?: string;
+  handshake_age_sec?: number;
+  rx_bytes?: number;
+  tx_bytes?: number;
+  dns?: string;
+  error?: string;
+}
+export interface CTFVpnSummary {
+  enabled: boolean;
+  filename?: string;
+  hash?: string;
+  address?: string;
+  dns?: string[];
+  mtu?: number;
+  endpoint?: string;
+  allowed_ips?: string[];
+  persistent_keepalive?: number;
+  peer_count?: number;
+  sidecar?: CTFVpnSidecarStatus;
 }

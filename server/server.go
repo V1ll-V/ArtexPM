@@ -865,6 +865,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/evidence", s.ctfEvidence)
 	mux.HandleFunc("POST /api/tasks/{id}/ctf/candidates/{candidateID}", s.decideCTFFlag)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/executions/{executionID}/log", s.ctfExecutionLog)
+	mux.HandleFunc("GET /api/tasks/{id}/ctf/vpn", s.ctfVPNGet)
+	mux.HandleFunc("PUT /api/tasks/{id}/ctf/vpn", s.ctfVPNPut)
+	mux.HandleFunc("DELETE /api/tasks/{id}/ctf/vpn", s.ctfVPNDelete)
+	mux.HandleFunc("POST /api/tasks/{id}/ctf/vpn/check", s.ctfVPNCheck)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
@@ -1501,6 +1505,8 @@ type createTaskReq struct {
 	Mode                 string   `json:"mode"`
 	ChallengeType        string   `json:"challenge_type"`
 	AttachmentBatchID    string   `json:"attachment_batch_id"`
+	CTFVPNConfig         string   `json:"ctf_vpn_config"`
+	CTFVPNFilename       string   `json:"ctf_vpn_filename"`
 	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
 	CategoryID           *int64   `json:"category_id,omitempty"`
 	Description          string   `json:"description"`
@@ -1580,8 +1586,14 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "任务级拦截规则无效："+err.Error())
 		return
 	}
+	vpnConfig, vpnHash, vpnFilename, err := prepareTaskVPNForCreate(req.Mode, req.CTFVPNConfig, req.CTFVPNFilename)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Mode: req.Mode, ChallengeType: req.ChallengeType, AttachmentBatchID: req.AttachmentBatchID,
+		CTFVPNConfig: vpnConfig, CTFVPNHash: vpnHash, CTFVPNFilename: vpnFilename,
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
@@ -1605,6 +1617,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
+	s.prewarmTaskVPN(t, vpnHash, vpnConfig)
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
